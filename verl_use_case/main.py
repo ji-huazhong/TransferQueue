@@ -1,6 +1,3 @@
-import os
-import socket
-
 import ray
 from omegaconf import OmegaConf
 
@@ -8,13 +5,12 @@ from ray_trainer_demo import RayPPOTrainer
 
 
 def main(config):
-
     ray.init()
 
     # Initialize the PPO trainer.
     trainer = RayPPOTrainer(
         config=config,
-        )
+    )
     # Initialize the workers of the trainer.
     trainer.init_workers()
     # Start the training process.

@@ -1,27 +1,38 @@
+import logging
+import math
+import multiprocessing
 import os
 import time
-import multiprocessing
-from typing import List, Dict, Optional, Union, Any, Callable, TypedDict
-from enum import Enum
-import ray
-import numpy as np
-import torch
-from torch import Tensor
-from tensordict import TensorDict
 from abc import ABC
-from threading import Thread
-import zmq
-import math
-import logging
-from uuid import uuid4
 from dataclasses import dataclass, field
+from threading import Thread
+from typing import Any, Callable, Optional
+from uuid import uuid4
 
-from .zmq_utils import ZMQRequestType, ZMQMessage, ZMQServerInfo, get_free_port, get_node_ip, create_zmq_socket, \
-    TransferQueueRole
-from .load_balance_strategy import random_strategy, dp_token_load_balancing_strategy, similar_seqlen_strategy, \
-    storage_unit_load_balancing_strategy
+import numpy as np
+import ray
+import torch
+import zmq
+from tensordict import TensorDict
+from torch import Tensor
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from .load_balance_strategy import (
+    dp_token_load_balancing_strategy,
+    random_strategy,
+    similar_seqlen_strategy,
+    storage_unit_load_balancing_strategy,
+)
+from .zmq_utils import (
+    TransferQueueRole,
+    ZMQMessage,
+    ZMQRequestType,
+    ZMQServerInfo,
+    create_zmq_socket,
+    get_free_port,
+    get_node_ip,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 CONTROLLER_STORAGE_HANDSHAKE_TIMEOUT = os.environ.get("CONTROLLER_STORAGE_HANDSHAKE_TIMEOUT", 30)
@@ -29,12 +40,6 @@ CONTROLLER_DATA_UPDATE_RESPONSE_TIMEOUT = os.environ.get("CONTROLLER_STORAGE_HAN
 POLLER_MAX_SIZE = os.environ.get("POLLER_MAX_SIZE", 1000)
 CONTROLLER_GET_METADATA_TIMEOUT = os.environ.get("CONTROLLER_GET_METADATA_TIMEOUT", 300)
 CONTROLLER_GET_METADATA_CHECK_INTERVAL = os.environ.get("CONTROLLER_GET_METADATA_CHECK_INTERVAL", 1)
-
-
-class IndexData(TypedDict):
-    columns: List[str]
-    local_indexes: List[int]
-    global_indexes: List[int]
 
 
 @dataclass
@@ -46,15 +51,16 @@ class ExperienceMeta:
     local_indexes: 局部索引列表
     storage_unit_ranks: 存储单元rank列表
     """
+
     # 使用default_factory来生成每个实例独立的空列表，避免初始化多个实例时可变对象默认值共享的问题
-    global_indexes: List[int] = field(default_factory=list)
-    columns: List[str] = field(default_factory=list)
-    local_indexes: List[int] = field(default_factory=list)
+    global_indexes: list[int] = field(default_factory=list)
+    columns: list[str] = field(default_factory=list)
+    local_indexes: list[int] = field(default_factory=list)
     # TODO: ID格式统一，用ID str替代rank编号管理数据 @jianjun；包括后面用rank id管理的一些逻辑
-    storage_unit_ranks: List[int] = field(default_factory=list)
+    storage_unit_ranks: list[int] = field(default_factory=list)
 
     # 建立 storage unit rank: Dict(columns: List[str], local_indexes: List[int], global_indexes: List[int])的映射
-    storage_unit_index_map: Dict[int, IndexData] = field(init=False, default_factory=dict)
+    storage_unit_index_map: dict[int, dict] = field(init=False, default_factory=dict)
 
     def __post_init__(self):
         """初始化时构建storage unit - index字典"""
@@ -64,34 +70,33 @@ class ExperienceMeta:
         self.storage_unit_index_map.clear()
 
         # 确保所有列表长度一致
-        if not (len(self.global_indexes) == len(self.local_indexes) == len(
-                self.storage_unit_ranks)):
+        if not (len(self.global_indexes) == len(self.local_indexes) == len(self.storage_unit_ranks)):
             raise ValueError("索引列表的长度必须一致")
 
         for i, storage_unit_rank in enumerate(self.storage_unit_ranks):
             # 初始化每个storage_unit_rank的字典
             if storage_unit_rank not in self.storage_unit_index_map:
                 self.storage_unit_index_map[storage_unit_rank] = {
-                    'columns': [],
-                    'local_indexes': [],
-                    'global_indexes': []
+                    "columns": [],
+                    "local_indexes": [],
+                    "global_indexes": [],
                 }
 
-            self.storage_unit_index_map[storage_unit_rank]['columns'] = self.columns
-            self.storage_unit_index_map[storage_unit_rank]['local_indexes'].append(self.local_indexes[i])
-            self.storage_unit_index_map[storage_unit_rank]['global_indexes'].append(self.global_indexes[i])
+            self.storage_unit_index_map[storage_unit_rank]["columns"] = self.columns
+            self.storage_unit_index_map[storage_unit_rank]["local_indexes"].append(self.local_indexes[i])
+            self.storage_unit_index_map[storage_unit_rank]["global_indexes"].append(self.global_indexes[i])
 
     @property
     def size(self) -> int:
         """返回当前块中的数据条目数"""
         return len(self.global_indexes)
 
-    def set_target_column(self, target_column: List[str]):
+    def set_target_column(self, target_column: list[str]):
         self.columns = target_column
         for rank in self.storage_unit_index_map:
-            self.storage_unit_index_map[rank]['columns'] = target_column
+            self.storage_unit_index_map[rank]["columns"] = target_column
 
-    def chunk(self, chunk_size: int) -> List['ExperienceMeta']:
+    def chunk(self, chunk_size: int) -> list["ExperienceMeta"]:
         """
         将当前数据块分割成更小的块
 
@@ -110,18 +115,14 @@ class ExperienceMeta:
                 global_indexes=self.global_indexes[start:end],
                 columns=self.columns.copy(),  # 复制列名列表
                 local_indexes=self.local_indexes[start:end],
-                storage_unit_ranks=self.storage_unit_ranks[start:end]
+                storage_unit_ranks=self.storage_unit_ranks[start:end],
             )
             chunks.append(chunk)
 
         return chunks
 
     @classmethod
-    def concat(
-            cls,
-            chunks: List['ExperienceMeta'],
-            validate: bool = True
-    ) -> Optional['ExperienceMeta']:
+    def concat(cls, chunks: list["ExperienceMeta"], validate: bool = True) -> Optional["ExperienceMeta"]:
         """
         连接多个数据块为一个大数据块
 
@@ -158,16 +159,21 @@ class ExperienceMeta:
             global_indexes=all_global_indexes,
             columns=chunks[0].columns.copy(),
             local_indexes=all_local_indexes,
-            storage_unit_ranks=all_storage_list
+            storage_unit_ranks=all_storage_list,
         )
 
 
 @ray.remote(max_concurrency=50, num_cpus=4)
 class TransferQueueController:
-    def __init__(self, controller_id: str, num_storage_units: int, global_batch_size: int, num_global_batch: int = 1,
-                 num_n_samples: int = 1, customized_sample_policy: Optional[Dict[str, Callable]] = {},
-                 ) -> None:
-
+    def __init__(
+        self,
+        controller_id: str,
+        num_storage_units: int,
+        global_batch_size: int,
+        num_global_batch: int = 1,
+        num_n_samples: int = 1,
+        customized_sample_policy: Optional[dict[str, Callable]] = None,
+    ) -> None:
         # self.controller_id = f"TQ_CONTROLLER_{uuid4()}"
         self.controller_id = controller_id  # FIXME 临时回滚：后续不在主控指定ID @jianjun
 
@@ -179,7 +185,9 @@ class TransferQueueController:
         self.num_n_samples = num_n_samples
         self.total_storage_size = self.global_batch_size * self.num_global_batch * self.num_n_samples
 
-        self.data_production_status = torch.zeros(self.total_storage_size, 20, dtype=torch.int8)  # 默认初始化20列，可动态扩展
+        self.data_production_status = torch.zeros(
+            self.total_storage_size, 20, dtype=torch.int8
+        )  # 默认初始化20列，可动态扩展
         self.data_consumption_status = {}  # Dict[bytes, torch.Tensor] (task_name -> 消费状态张量)
         self.column_name_mapping = {}  # 一个data_column和data_status列index的映射表
         # 例如：{'Prompt':0, 'Response':1, ...}
@@ -192,13 +200,19 @@ class TransferQueueController:
         self._register_default_policy()
 
         # User may pass multiple customized policies for different tasks' sampling
-        for customized_policy_name, customized_policy_func in customized_sample_policy.items():
-            if customized_policy_name is not None and customized_policy_func is not None:
-                self._register_customized_policy(customized_policy_name, customized_policy_func)
+        if customized_sample_policy is not None:
+            for (
+                customized_policy_name,
+                customized_policy_func,
+            ) in customized_sample_policy.items():
+                if customized_policy_name is not None and customized_policy_func is not None:
+                    self._register_customized_policy(customized_policy_name, customized_policy_func)
 
-        self.wait_connection_thread = Thread(target=self._wait_connection,
-                                             name="TransferQueueControllerWaitConnectionThread",
-                                             daemon=True)
+        self.wait_connection_thread = Thread(
+            target=self._wait_connection,
+            name="TransferQueueControllerWaitConnectionThread",
+            daemon=True,
+        )
         self.wait_connection_thread.start()
         self._start_process_request()
 
@@ -206,18 +220,15 @@ class TransferQueueController:
         # 获取或创建指定消费者的消费状态张量
         if task_name not in self.data_consumption_status:
             # 为新消费者初始化状态
-            self.data_consumption_status[task_name] = torch.zeros(
-                self.total_storage_size,
-                dtype=torch.int8
-            )
+            self.data_consumption_status[task_name] = torch.zeros(self.total_storage_size, dtype=torch.int8)
         return self.data_consumption_status[task_name]
 
-    def generate_data_status_mask(self, data_columns: List[str], global_step: int, task_name: str) -> (
-            Tensor, Tensor):
+    def generate_data_status_mask(self, data_columns: list[str], global_step: int, task_name: str) -> (Tensor, Tensor):
         # 该函数在_get_meta中被调用，根据用户指定的列和当前的step，生成一个mask矩阵
         # 其中用户指定的列为入参，当前step对应的行（即global index范围）按照顺序映射即可
         # 该mask矩阵将self.data_production_status中，用户需要的行列选中，同时将self.data_consumption_status反选，
-        # 从而生成一个子矩阵，以便在_get_meta的过程中支持自动向量化操作加速状态查询（直接按行sum判断是否等于shape[1]即可）
+        # 从而生成一个子矩阵，以便在_get_meta的过程中支持自动向量化操作加速状态查询（直接按行sum判断是否等于shape[1]
+        # 即可）
 
         # step映射到global index
         start_idx = (global_step % self.num_global_batch) * self.global_batch_size * self.num_n_samples
@@ -227,7 +238,7 @@ class TransferQueueController:
 
         # 按消费状态反选
         consumer_status = self._get_consumer_status(task_name)
-        unconsumed_mask = (consumer_status == 0)
+        unconsumed_mask = consumer_status == 0
         row_mask &= unconsumed_mask
 
         # 选中指定的列
@@ -239,16 +250,21 @@ class TransferQueueController:
         return row_mask, col_mask
 
     def _build_index_storage_mapping(self):
-        # 根据数据系统总空间与StorageUnit数量，划分每个Sample应该存储的位置，并维护global index和每个存储内local index的映射
+        # 根据数据系统总空间与StorageUnit数量，划分每个Sample应该存储的位置，并维护global index和每个
+        # 存储内local index的映射
 
-        # 为每条样本分配存储节点；注意我们应该将每个GBS数据打散在不同存储节点上。这里和generate_data_status_mask一样，默认按照顺序排列样本
+        # 为每条样本分配存储节点；注意我们应该将每个GBS数据打散在不同存储节点上。这里和generate_data_status_mask一样，
+        # 默认按照顺序排列样本
         real_global_batch_size = self.global_batch_size * self.num_n_samples
         global_batch_per_storage_unit = math.ceil(real_global_batch_size / self.num_storage_units)
 
         # 构建global index与storage unit之间的映射，用于查找每条数据对应的存储节点位置
-        batch_storage_indices = np.repeat(np.arange(self.num_storage_units),
-                                          global_batch_per_storage_unit)[:real_global_batch_size]
-        self.global_index_storage_mapping = np.tile(batch_storage_indices, self.num_global_batch)  # TODO: storage_unit_ranks -> storage_unit_ids, 这里改成字典 @jianjun
+        batch_storage_indices = np.repeat(np.arange(self.num_storage_units), global_batch_per_storage_unit)[
+            :real_global_batch_size
+        ]
+        self.global_index_storage_mapping = np.tile(
+            batch_storage_indices, self.num_global_batch
+        )  # TODO: storage_unit_ranks -> storage_unit_ids, 这里改成字典 @jianjun
 
         # 构建global index与每个storage unit之间local index之间的映射
         indices = np.arange(self.total_storage_size)
@@ -279,7 +295,8 @@ class TransferQueueController:
     #
     #     # 为保证兼容性，当前考虑支持两种使用方式：
     #     # 方式1：主控读取所有DP的metadata，通过dispatch进行分发。此时无需指定dp_rank与dp_size
-    #     # 方式2：每个Rank自行请求数据，这时需要指定dp_rank与dp_size，在TransferQueue系统内保证相同DP拿到相同数据、不同DP拿到不同数据
+    #     # 方式2：每个Rank自行请求数据，这时需要指定dp_rank与dp_size，在TransferQueue系统内保证相同DP拿到
+    #     # 相同数据、不同DP拿到不同数据
     #
     #     # 1. 根据是否指定dp_rank、dp_size、rank_id，判断是否需要记录请求队列
     #     if dp_rank and dp_size and rank_id:
@@ -302,7 +319,9 @@ class TransferQueueController:
     #     # 2. 扫描数据状态，找到所有可消费数据
     #     ready_for_consume_idx = self._scan_data_status(data_columns, current_step, get_n_samples)
     #     # 3. 执行负载均衡，采样一批数据
-    #     batch_global_indexes = self._run_schedule_policy(schedule_policy, experience_count, ready_for_consume_idx, *args, **kwargs)
+    #     batch_global_indexes = self._run_schedule_policy(
+    #         schedule_policy, experience_count, ready_for_consume_idx, *args, **kwargs
+    #     )
     #     # 4. 标记这批数据状态为已消费
     #     self.data_consumption_status[batch_global_indexes] = 1
     #     # 5. 打包为metadata
@@ -313,32 +332,34 @@ class TransferQueueController:
     #
     #     return metadata
 
-    def _get_metadata(self,
-                      data_columns: List[str],
-                      experience_count: int,
-                      dp_world_size: int,
-                      task_name: str,
-                      get_n_samples=False,
-                      global_step=0,
-                      schedule_policy: str = 'dp_token_load_balancing_strategy',
-                      *args,
-                      **kwargs) -> ExperienceMeta:
+    def _get_metadata(
+        self,
+        data_columns: list[str],
+        experience_count: int,
+        dp_world_size: int,
+        task_name: str,
+        get_n_samples=False,
+        global_step=0,
+        schedule_policy: str = "dp_token_load_balancing_strategy",
+        *args,
+        **kwargs,
+    ) -> ExperienceMeta:
         # 向TransferQueue读数据时，查找当前batch内可被消费的样本，并打包返回ExperienceMeta
-        
+
         # 循环检查可被消费的数据
         start_time = time.time()
         while True:
             ready_for_consume_idx = self._scan_data_status(data_columns, global_step, task_name, get_n_samples)
-            
+
             if len(ready_for_consume_idx) >= experience_count:
                 break
-                
+
             if time.time() - start_time > CONTROLLER_GET_METADATA_TIMEOUT:
                 raise TimeoutError(
                     f"Timeout while waiting for sufficient data. "
                     f"Required: {experience_count}, Available: {len(ready_for_consume_idx)}"
                 )
-            
+
             logger.warning(
                 f"Insufficient data available. Required: {experience_count}, "
                 f"Available: {len(ready_for_consume_idx)}. Retrying in {CONTROLLER_GET_METADATA_CHECK_INTERVAL}s..."
@@ -346,8 +367,9 @@ class TransferQueueController:
             time.sleep(CONTROLLER_GET_METADATA_CHECK_INTERVAL)
         logger.info(f"ready for consume idx: {ready_for_consume_idx}")
         # 执行负载均衡，采样一批数据
-        batch_global_indexes = self._run_schedule_policy(schedule_policy, ready_for_consume_idx, experience_count,
-                                                         *args, **kwargs)
+        batch_global_indexes = self._run_schedule_policy(
+            schedule_policy, ready_for_consume_idx, experience_count, *args, **kwargs
+        )
         # 标记这批数据状态为已消费
         consumer_status = self._get_consumer_status(task_name)
         consumer_status[batch_global_indexes] = 1
@@ -360,12 +382,13 @@ class TransferQueueController:
 
         return metadata
 
-    def _get_prompt_metadata(self,
-                             data_columns: List[str],
-                             experience_count: int,
-                             global_step: int,
-                             n_samples_per_prompt: int,
-                             ) -> ExperienceMeta:
+    def _get_prompt_metadata(
+        self,
+        data_columns: list[str],
+        experience_count: int,
+        global_step: int,
+        n_samples_per_prompt: int,
+    ) -> ExperienceMeta:
         start_idx = (global_step % self.num_global_batch) * experience_count * n_samples_per_prompt
         end_idx = start_idx + experience_count * n_samples_per_prompt
 
@@ -373,7 +396,13 @@ class TransferQueueController:
         metadata = self._generate_experience_meta(batch_global_indexes, data_columns)
         return metadata
 
-    def _scan_data_status(self, data_columns: List[str], global_step: int, task_name: str, get_n_samples: bool) -> List[int]:
+    def _scan_data_status(
+        self,
+        data_columns: list[str],
+        global_step: int,
+        task_name: str,
+        get_n_samples: bool,
+    ) -> list[int]:
         # 获取行和列掩码
         row_mask, col_mask = self.generate_data_status_mask(data_columns, global_step, task_name)
         logger.info(f"row_mask, col_mask: {row_mask, col_mask}")
@@ -399,8 +428,8 @@ class TransferQueueController:
             # 计算所有样本索引
             sample_offset = torch.arange(self.num_n_samples, device=self.device)
             ready_for_consume_idx = (
-                    ready_group_indices.unsqueeze(1) * self.num_n_samples + sample_offset
-            ).flatten().tolist()
+                (ready_group_indices.unsqueeze(1) * self.num_n_samples + sample_offset).flatten().tolist()
+            )
 
             return ready_for_consume_idx
         else:
@@ -417,13 +446,15 @@ class TransferQueueController:
             2. dp_token_load_balancing_strategy: get index using karmarkar_karp strategy across DP
             3. similar_seqlen_strategy: get index around certain specified seqlen
             node-relevant policies:
-            4. storage_unit_load_balancing_strategy: get index from different storage nodes using the round-robin strategy
+            4. storage_unit_load_balancing_strategy: get index from different storage nodes using the
+            round-robin strategy
         """
-        self.schedule_policies = {"random_strategy": random_strategy,
-                                  "dp_token_load_balancing_strategy": dp_token_load_balancing_strategy,
-                                  "similar_seqlen_strategy": similar_seqlen_strategy,
-                                  "storage_unit_load_balancing_strategy": storage_unit_load_balancing_strategy,
-                                  }
+        self.schedule_policies = {
+            "random_strategy": random_strategy,
+            "dp_token_load_balancing_strategy": dp_token_load_balancing_strategy,
+            "similar_seqlen_strategy": similar_seqlen_strategy,
+            "storage_unit_load_balancing_strategy": storage_unit_load_balancing_strategy,
+        }
 
     def _register_customized_policy(self, policy_name: str, policy_func: Callable) -> None:
         """
@@ -440,8 +471,14 @@ class TransferQueueController:
 
         self.schedule_policies[policy_name] = policy_func
 
-    def _run_schedule_policy(self, policy_name: str, ready_for_consume_idx: List[int], experience_count: int, *args,
-                             **kwargs) -> Optional[List[int]]:
+    def _run_schedule_policy(
+        self,
+        policy_name: str,
+        ready_for_consume_idx: list[int],
+        experience_count: int,
+        *args,
+        **kwargs,
+    ) -> Optional[list[int]]:
         """
         run the scheduler policy based on policy_name, ready_for_consume_idx, required experience_count
         now the schedule process is called by trainer and sample indexes for all DPs are decided altogether
@@ -453,10 +490,14 @@ class TransferQueueController:
 
         assert len(ready_for_consume_idx) % experience_count == 0
 
-        return self.schedule_policies[policy_name](ready_for_consume_idx=ready_for_consume_idx,
-                                                   experience_count=experience_count, *args, **kwargs)
+        return self.schedule_policies[policy_name](
+            *args,
+            ready_for_consume_idx=ready_for_consume_idx,
+            experience_count=experience_count,
+            **kwargs,
+        )
 
-    def _generate_experience_meta(self, global_indexes: List[int], data_columns: List[str]) -> ExperienceMeta:
+    def _generate_experience_meta(self, global_indexes: list[int], data_columns: list[str]) -> ExperienceMeta:
         # 根据给定的global index，查找self.global_index_local_index_mapping和self.global_index_storage_mapping，确定对应
         # 存储节点的地址，并构建ExperienceMeta
         global_arr = np.array(global_indexes)
@@ -467,7 +508,7 @@ class TransferQueueController:
             global_indexes=global_indexes,
             columns=data_columns,
             local_indexes=local_indexes.tolist(),
-            storage_unit_ranks=storage_ranks.tolist()
+            storage_unit_ranks=storage_ranks.tolist(),
         )
 
     def _update_production_status(self, indexes, column):
@@ -486,11 +527,9 @@ class TransferQueueController:
                     new_columns = torch.zeros(
                         (self.storage_size, add_cols),
                         dtype=torch.int8,
-                        device=self.data_production_status.device
+                        device=self.data_production_status.device,
                     )
-                    self.data_production_status = torch.cat(
-                        [self.data_production_status, new_columns], dim=1
-                    )
+                    self.data_production_status = torch.cat([self.data_production_status, new_columns], dim=1)
 
             index = torch.tensor(index, dtype=torch.long)
             col_idx = self.column_name_mapping[column[i]]
@@ -532,7 +571,7 @@ class TransferQueueController:
                 "handshake_socket": self._handshake_socket_port,
                 "request_handle_socket": self._request_handle_socket_port,
                 "data_status_update_socket": self._data_status_update_socket_port,
-            }
+            },
         )
 
     def _wait_connection(self):
@@ -551,19 +590,23 @@ class TransferQueueController:
                     body={},
                 ).serialize()
                 self.handshake_socket.send_multipart([identity, ack_msg])
-                logger.info(f"Controller send handshake ack successful!")
+                logger.info("Controller send handshake ack successful!")
         self.storage_units = connected_storage_units
 
     def _start_process_request(self):
         # 拉起处理任务
-        self.process_update_data_status_thread = Thread(target=self._update_data_status,
-                                                        name="TransferQueueControllerProcessUpdateDataStatusThread",
-                                                        daemon=True)
+        self.process_update_data_status_thread = Thread(
+            target=self._update_data_status,
+            name="TransferQueueControllerProcessUpdateDataStatusThread",
+            daemon=True,
+        )
         self.process_update_data_status_thread.start()
 
-        self.process_request_thread = Thread(target=self._process_request,
-                                             name="TransferQueueControllerProcessRequestThread",
-                                             daemon=True)
+        self.process_request_thread = Thread(
+            target=self._process_request,
+            name="TransferQueueControllerProcessRequestThread",
+            daemon=True,
+        )
         self.process_request_thread.start()
 
     def _process_request(self):
@@ -577,31 +620,28 @@ class TransferQueueController:
                 params = request.body
 
                 metadata = self._get_prompt_metadata(
-                    data_columns=params['data_columns'],
-                    experience_count=params['experience_count'],
-                    global_step=params['global_step'],
-                    n_samples_per_prompt=params['n_samples_per_prompt'],
+                    data_columns=params["data_columns"],
+                    experience_count=params["experience_count"],
+                    global_step=params["global_step"],
+                    n_samples_per_prompt=params["n_samples_per_prompt"],
                 )
                 response_msg = ZMQMessage.create(
                     request_type=ZMQRequestType.GET_PROMPT_META_RESPONSE,
                     sender_id=self.controller_id,
-                    body={
-                        'status': 'SUCCESS',
-                        'metadata': metadata
-                    }
+                    body={"status": "SUCCESS", "metadata": metadata},
                 )
             elif request.request_type == ZMQRequestType.GET_META:
                 params = request.body
                 # 处理元数据请求
-                logger.info(f"Controller prepare get metadata...")
+                logger.info("Controller prepare get metadata...")
                 metadata = self._get_metadata(
-                    data_columns=params['data_columns'],
-                    experience_count=params['experience_count'],
-                    global_step=params['global_step'],
-                    dp_world_size=params['dp_world_size'],
-                    task_name=params['task_name'],
-                    get_n_samples=params.get('get_n_samples', False),
-                    schedule_policy=params.get('schedule_policy', 'DP_balance')
+                    data_columns=params["data_columns"],
+                    experience_count=params["experience_count"],
+                    global_step=params["global_step"],
+                    dp_world_size=params["dp_world_size"],
+                    task_name=params["task_name"],
+                    get_n_samples=params.get("get_n_samples", False),
+                    schedule_policy=params.get("schedule_policy", "DP_balance"),
                 )
 
                 # 构建响应消息
@@ -609,17 +649,14 @@ class TransferQueueController:
                     request_type=ZMQRequestType.GET_META_RESPONSE,
                     sender_id=self.controller_id,
                     receiver_id=request.sender_id,
-                    body={
-                        'status': 'SUCCESS',
-                        'metadata': metadata
-                    }
+                    body={"status": "SUCCESS", "metadata": metadata},
                 )
             elif request.request_type == ZMQRequestType.CHECK_CONSUMPTION:
                 # 消费状态检查
                 params = request.body
-                global_step = params['global_step']
+                global_step = params["global_step"]
 
-                consumer_status = self._get_consumer_status(params['task_name'])
+                consumer_status = self._get_consumer_status(params["task_name"])
                 start_idx = (global_step % self.num_global_batch) * self.global_batch_size * self.num_n_samples
                 end_idx = start_idx + self.global_batch_size * self.num_n_samples
                 batch_status = consumer_status[start_idx:end_idx]
@@ -631,23 +668,20 @@ class TransferQueueController:
                     sender_id=self.controller_id,
                     receiver_id=request.sender_id,
                     body={
-                        'status': 'SUCCESS',
-                        'global_step': global_step,
-                        'consumed': consumed,
-                    }
+                        "status": "SUCCESS",
+                        "global_step": global_step,
+                        "consumed": consumed,
+                    },
                 )
-            self.request_handle_socket.send_multipart([
-                identity,
-                response_msg.serialize()
-            ])
-            logger.warning(f"Controller request_handle_socket send_multipart successful!")
+            self.request_handle_socket.send_multipart([identity, response_msg.serialize()])
+            logger.warning("Controller request_handle_socket send_multipart successful!")
 
     def _update_data_status(self):
         # 用于接受来自storage的数据状态更新信息
         while True:
-            logger.warning(f"Prepare _update_data_status...")
+            logger.warning("Prepare _update_data_status...")
             identity, request_bytes = self.data_status_update_socket.recv_multipart()
-            logger.info(f"Controller recv update_data_status requeset!")
+            logger.info("Controller recv update_data_status requeset!")
             request = ZMQMessage.deserialize(request_bytes)
 
             if request.request_type == ZMQRequestType.NOTIFY_DATA_UPDATE:
@@ -667,11 +701,11 @@ class TransferQueueController:
                     sender_id=self.controller_id,
                     body={
                         "controller_id": self.controller_id,
-                        "message": f"Data update acknowledged from controller {self.controller_id}"
-                    }
+                        "message": f"Data update acknowledged from controller {self.controller_id}",
+                    },
                 )
                 self.data_status_update_socket.send_multipart([identity, response_msg.serialize()])
-                logger.info(f"Controller send DATA_UPDATE_ACK successful!")
+                logger.info("Controller send DATA_UPDATE_ACK successful!")
             elif request.request_type == ZMQRequestType.NOTIFY_DATA_UPDATE_ERROR:
                 # 处理数据更新错误
                 error_msg = request.body.get("message", "Unknown error")
@@ -683,32 +717,30 @@ class TransferQueueController:
                     sender_id=self.controller_id,
                     body={
                         "controller_id": self.controller_id,
-                        "message": f"Error notification acknowledged from controller {self.controller_id}"
-                    }
+                        "message": f"Error notification acknowledged from controller {self.controller_id}",
+                    },
                 )
                 self.data_status_update_socket.send_multipart([identity, response_msg.serialize()])
 
     def get_zmq_server_info(self) -> ZMQServerInfo:
         return self.zmq_server_info
 
-    def clear(self, global_steps: Union[int, List[int]]):
+    def clear(self, global_steps: int | list[int]):
         # 清空对应global batch的数据
         pass
 
 
-class TransferQueueStorage(ABC):
+class TransferQueueStorage(ABC):  # noqa: B024
     # TODO
     # 提供一个Storage基础能力的抽象，可被各种分布式存储后端实现，作为存储面的统一管理
-    # 更一般地，可以提供一个general的kv存储，TransferQueueController实现global index和分布式存储的key的查找表，直接调用底层分布式
-    # 存储的接口进行数据读写
-    def __init__(self):
-        pass
+    # 更一般地，可以提供一个general的kv存储，TransferQueueController实现global index和
+    # 分布式存储的key的查找表，直接调用底层分布式存储的接口进行数据读写
 
-    def put(self):
-        pass
+    def __init__(self): ...  # noqa: B027
 
-    def get(self):
-        pass
+    def put(self): ...  # noqa: B027
+
+    def get(self): ...  # noqa: B027
 
 
 @ray.remote(max_concurrency=50, num_cpus=4)
@@ -729,40 +761,20 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
             role=TransferQueueRole.STORAGE,
             id=str(self.storage_unit_id),
             ip=get_node_ip(),
-            ports={"put_get_socket": get_free_port()}
+            ports={"put_get_socket": get_free_port()},
         )
         self._init_zmq_socket()
 
     def _init_zmq_socket(self):
-        """
-        ############################################################################################################################################################
-        socket类型                           zmq类型        访问类型               request_type                    含义
-        ############################################################################################################################################################
-        self.controller_handshake_socket    DEALER         send                 HANDSHAKE                       向所有的controller发送handshake请求
-        self.controller_handshake_socket    DEALER         recv                 HANDSHAKE_ACK                   接收到controller响应handshake成功的信号
-        ############################################################################################################################################################
-        self.data_status_update_socket      DEALER         send                 NOTIFY_DATA_UPDATE              向所有的controller广播通知数据更新的信息
-        self.data_status_update_socket      DEALER         recv                 NOTIFY_DATA_UPDATE_ACK          接收到所有controller反馈的数据更新确认接收信息
-        self.data_status_update_socket      DEALER         send                 NOTIFY_DATA_UPDATE_ERROR        向所有的controller广播通知数据更新错误的信息
-        ############################################################################################################################################################
-        self.put_get_socket                 ROUTER         recv_multipart       GET                             接收到client发送的数据读取请求
-        self.put_get_socket                 ROUTER         recv_multipart       PUT                             接收到client发送的数据写入请求
-        self.put_get_socket                 ROUTER         send_multipart       PUT_GET_OPERATION_ERROR         接收到client发送的数据读写请求，处理过程中发现非PUT/GET请求
-        self.put_get_socket                 ROUTER         send_multipart       PUT_GET_ERROR                   接收到client发送的数据读写请求，处理过程出现错误
-        self.put_get_socket                 ROUTER         send_multipart       PUT_ACK                         接收到client发送的数据写入请求，写入成功并返回数据写入相关信息
-        self.put_get_socket                 ROUTER         send_multipart       PUT_FULL_ERROR                  接收到client发送的数据写入请求，数据条目数超过最大限制报错
-        self.put_get_socket                 ROUTER         send_multipart       PUT_ERROR                       接收到client发送的数据写入请求，处理过程出现错误
-        self.put_get_socket                 ROUTER         send_multipart       GET_ACK                         接收到client发送的数据读取请求，读取成功并返回读取数据结果
-        self.put_get_socket                 ROUTER         send_multipart       GET_ERROR                       接收到client发送的数据读取请求，处理过程出现错误
-        ############################################################################################################################################################
-        """
         self.zmq_context = zmq.Context()
 
-        # controller_handshake_socket用于和controller握手建链, 作为客户端(DEALER)发送请求, 并接收controller确认握手成功的ACK信息
-        self.controller_handshake_sockets: Dict[str, zmq.Socket] = {}
+        # controller_handshake_socket用于和controller握手建链, 作为客户端(DEALER)发送请求,
+        # 并接收controller确认握手成功的ACK信息
+        self.controller_handshake_sockets: dict[str, zmq.Socket] = {}
 
-        # data_status_update_socket用于和controller广播数据更新信息, 作为客户端(DEALER)广播信息, 并接收controller确认拿到更新信息的ACK信息
-        self.data_status_update_socket: Dict[str, zmq.Socket] = {}
+        # data_status_update_socket用于和controller广播数据更新信息, 作为客户端(DEALER)广播信息,
+        # 并接收controller确认拿到更新信息的ACK信息
+        self.data_status_update_socket: dict[str, zmq.Socket] = {}
 
         # put_get_socket用于接收client发起的数据读/写请求，作为服务端(ROUTER)处理请求, 并反馈处理结果
         self.put_get_socket_address = self.zmq_server_info.to_addr("put_get_socket")
@@ -780,7 +792,7 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                 port = match.group(2)
         """
 
-    def register_controller_info(self, controller_infos: Dict[str, ZMQServerInfo]):
+    def register_controller_info(self, controller_infos: dict[str, ZMQServerInfo]):
         self.controller_infos = controller_infos
         self._init_zmq_socket_using_controller_infos()
         self._connect_to_controller()
@@ -788,11 +800,20 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
 
     def _init_zmq_socket_using_controller_infos(self):
         for controller_id in self.controller_infos.keys():
-            self.controller_handshake_sockets[controller_id] = create_zmq_socket(self.zmq_context, zmq.DEALER, identity=f"{self.storage_unit_id}-controller_handshake_sockets-{uuid4()}".encode())
-            self.data_status_update_socket[controller_id] = create_zmq_socket(self.zmq_context, zmq.DEALER, identity=f"{self.storage_unit_id}-data_status_update_socket-{uuid4()}".encode())
+            self.controller_handshake_sockets[controller_id] = create_zmq_socket(
+                self.zmq_context,
+                zmq.DEALER,
+                identity=f"{self.storage_unit_id}-controller_handshake_sockets-{uuid4()}".encode(),
+            )
+            self.data_status_update_socket[controller_id] = create_zmq_socket(
+                self.zmq_context,
+                zmq.DEALER,
+                identity=f"{self.storage_unit_id}-data_status_update_socket-{uuid4()}".encode(),
+            )
 
     def _connect_to_controller(self):
-        # TODO(zjj): 单个DEALER连接多个ROUTER，默认做负载均衡，因此使用多个socket握手。考虑使用单个socket指定连接的ROUTER
+        # TODO(zjj): 单个DEALER连接多个ROUTER，默认做负载均衡，因此使用多个socket握手。
+        # 考虑使用单个socket指定连接的ROUTER
         """Connect to all controllers"""
         connected_controllers = set()
 
@@ -811,34 +832,40 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                     body={
                         "storage_unit_id": self.storage_unit_id,
                         "storage_size": self.storage_size,
-                    }
+                    },
                 ).serialize()
             )
             poller.register(self.controller_handshake_sockets[controller_id], zmq.POLLIN)
 
         start_time = time.time()
-        while len(connected_controllers) < len(
-                self.controller_infos) and time.time() - start_time < CONTROLLER_STORAGE_HANDSHAKE_TIMEOUT:
+        while (
+            len(connected_controllers) < len(self.controller_infos)
+            and time.time() - start_time < CONTROLLER_STORAGE_HANDSHAKE_TIMEOUT
+        ):
             socks = dict(poller.poll(POLLER_MAX_SIZE))
-            logger.info(f"Prepare for handshake...")
+            logger.info("Prepare for handshake...")
             for controller_handshake_socket in self.controller_handshake_sockets.values():
                 if controller_handshake_socket in socks:
                     msg = ZMQMessage.deserialize(controller_handshake_socket.recv())
                     if msg.request_type == ZMQRequestType.HANDSHAKE_ACK:
                         connected_controllers.add(msg.sender_id)
                         # TODO: 各种id都是字符串
-                        logger.info(f"Controller id # {self.controller_handshake_sockets[int(msg.sender_id)]} and storage "
-                                    f"id # {self.zmq_server_info.id} handshake successful.")
+                        logger.info(
+                            f"Controller id # {self.controller_handshake_sockets[int(msg.sender_id)]} and storage "
+                            f"id # {self.zmq_server_info.id} handshake successful."
+                        )
 
         if len(connected_controllers) < len(self.controller_infos):
-            print(f"Warning: After controller handshake from TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, "
-                  f"only connected to {len(connected_controllers)} out of {len(self.controller_infos)} controllers.")
+            print(
+                f"Warning: After controller handshake from TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, "
+                f"only connected to {len(connected_controllers)} out of {len(self.controller_infos)} controllers."
+            )
 
     def _start_process_put_get(self):
         self.process_put_get_thread = Thread(
             target=self._process_put_get,
             name=f"TransferQueueStorageSimpleUnitProcessPutGetThread_{self.zmq_server_info.id}",
-            daemon=True
+            daemon=True,
         )
         self.process_put_get_thread.start()
 
@@ -869,8 +896,8 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                             sender_id=self.zmq_server_info.id,
                             body={
                                 "message": f"TransferQueueStorageSimpleUnit_{self.zmq_server_info.id} occur "
-                                            f"invalid operation: {operation}"
-                            }
+                                f"invalid operation: {operation}"
+                            },
                         )
                 except Exception as e:
                     response_msg = ZMQMessage.create(
@@ -878,8 +905,8 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                         sender_id=self.zmq_server_info.id,
                         body={
                             "message": f"TransferQueueStorageSimpleUnit_{self.zmq_server_info.id} occur error in "
-                                    f"processing put/get, detail error message: {str(e)}"
-                        }
+                            f"processing put/get, detail error message: {str(e)}"
+                        },
                     )
                 self.put_get_socket.send_multipart([identity, response_msg.serialize()])
 
@@ -900,16 +927,19 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
 
             new_rows = [row for row in row_idx if row not in self.experience_data]
             if self.current_size + len(new_rows) > self.storage_size:
-                logger.warning(f"WARNING: Storage unit is full! Current: {self.current_size}, Max: {self.storage_size}, Requested: {len(new_rows)}")
+                logger.warning(
+                    f"WARNING: Storage unit is full! Current: {self.current_size}, "
+                    f"Max: {self.storage_size}, Requested: {len(new_rows)}"
+                )
 
                 return ZMQMessage.create(
                     request_type=ZMQRequestType.PUT_FULL_ERROR,
                     sender_id=self.zmq_server_info.id,
                     body={
                         "message": f"TransferQueueStorageSimpleUnit_{self.zmq_server_info.id} is full, "
-                                    f"current data can not be put into this storage unit, "
-                                    f"storage max size: {self.storage_size}."
-                    }
+                        f"current data can not be put into this storage unit, "
+                        f"storage max size: {self.storage_size}."
+                    },
                 )
 
             # TODO: 效率优化 @congzhen
@@ -922,7 +952,7 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
             print(f"self.experience_data: {self.experience_data}")
 
             # after put operation finish, send a message to the client
-            logger.warning(f"Storage prepare send PUT_DATA_RESPONSE to client...")
+            logger.warning("Storage prepare send PUT_DATA_RESPONSE to client...")
             response_msg = ZMQMessage.create(
                 request_type=ZMQRequestType.PUT_DATA_RESPONSE,
                 sender_id=self.zmq_server_info.id,
@@ -935,9 +965,9 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                         # TODO：这里的row col item等较难理解，和ExperienceMeta中给出的信息有gap，需优化 @congzhen
                         "zmq_server_info": self.zmq_server_info,
                     }
-                }
+                },
             )
-            logger.info(f"Storage get PUT_DATA_RESPONSE successful!")
+            logger.info("Storage get PUT_DATA_RESPONSE successful!")
             # broadcast data update message to controllers
             self._notify_data_update(row_idx, col_idx)
             return response_msg
@@ -947,8 +977,8 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                 sender_id=self.zmq_server_info.id,
                 body={
                     "message": f"Failed to put data into TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, "
-                                f"detail error message: {str(e)}"
-                }
+                    f"detail error message: {str(e)}"
+                },
             )
         finally:
             self._semaphore.release()
@@ -965,7 +995,7 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
             data_status_update_socket = self.data_status_update_socket[controller_id]
             logger.info(f"Storage unit Prepare connect data_status_update_socket...| controller: {controller_info}")
             data_status_update_socket.connect(controller_info.to_addr("data_status_update_socket"))
-            logger.info(f"Storage unit data_status_update_socket connect successful!")
+            logger.info("Storage unit data_status_update_socket connect successful!")
             try:
                 poller.register(data_status_update_socket, zmq.POLLIN)
                 data_status_update_socket.send(
@@ -978,40 +1008,47 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                                 "current_size": self.current_size,
                                 "row_idx": row_idx,
                                 "col_idx": col_idx,
-                                # TODO：这里的row col item等较难理解，和ExperienceMeta中给出的信息有gap，需优化 @congzhen
+                                # TODO：这里的row col item等较难理解，和ExperienceMeta中给出的信息有gap，
+                                # 需优化 @congzhen
                                 "zmq_server_info": self.zmq_server_info,
                             }
-                        }
+                        },
                     ).serialize()
                 )
             except Exception as e:
-                logger.warning(f"Storage unit data_status_update_socket error")
+                logger.warning("Storage unit data_status_update_socket error")
                 data_status_update_socket.send(
                     ZMQMessage.create(
                         request_type=ZMQRequestType.NOTIFY_DATA_UPDATE_ERROR,
                         sender_id=self.zmq_server_info.id,
                         body={
                             "message": f"Failed to notify data status update information from "
-                                    f"TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, detail error message: {str(e)}"
-                        }
+                            f"TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, detail error message: {str(e)}"
+                        },
                     ).serialize()
                 )
 
         response_controllers = set()
         start_time = time.time()
-        while len(response_controllers) < len(
-                self.controller_infos) and time.time() - start_time < CONTROLLER_DATA_UPDATE_RESPONSE_TIMEOUT:
+        while (
+            len(response_controllers) < len(self.controller_infos)
+            and time.time() - start_time < CONTROLLER_DATA_UPDATE_RESPONSE_TIMEOUT
+        ):
             socks = dict(poller.poll(POLLER_MAX_SIZE))
             for data_status_update_socket in self.data_status_update_socket.values():
                 if data_status_update_socket in socks:
                     msg = ZMQMessage.deserialize(data_status_update_socket.recv())
                     if msg.request_type == ZMQRequestType.NOTIFY_DATA_UPDATE_ACK:
-                        # TODO @zhangyebin controller在向storage发送NOTIFY_DATA_UPDATE_ACK时, 需要同步反馈ZMQServerInfo.serder_id
+                        # TODO @zhangyebin controller在向storage发送NOTIFY_DATA_UPDATE_ACK时,
+                        # 需要同步反馈ZMQServerInfo.sender_id
                         response_controllers.add(msg.sender_id)
 
         if len(response_controllers) < len(self.controller_infos):
-            print(f"Warning: After data status update in TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, "
-                  f"only get {len(response_controllers)} out of {len(self.controller_infos)} ACK responses from controllers.")
+            logger.warning(
+                f"Warning: After data status update in TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, "
+                f"only get {len(response_controllers)} out of {len(self.controller_infos)} "
+                f"ACK responses from controllers."
+            )
 
     def _handle_get(self, data_parts: ZMQMessage):
         ####### data_parts structure #######
@@ -1049,7 +1086,7 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                         "data": result_data,
                         "zmq_server_info": self.zmq_server_info,
                     }
-                }
+                },
             )
 
         except Exception as e:
@@ -1058,8 +1095,8 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
                 sender_id=self.zmq_server_info.id,
                 body={
                     "message": f"Failed to get data from TransferQueueStorageSimpleUnit_{self.zmq_server_info.id}, "
-                               f"detail error message: {str(e)}"
-                }
+                    f"detail error message: {str(e)}"
+                },
             )
         return response_msg
 
@@ -1069,16 +1106,15 @@ class TransferQueueStorageSimpleUnit(TransferQueueStorage):
 
 class TransferQueueClient:
     def __init__(
-            self,
-            client_id: str,
-            controller_infos: Union[ZMQServerInfo, Dict[Any, ZMQServerInfo]],
-            storage_infos: Union[ZMQServerInfo, Dict[Any, ZMQServerInfo]],
-            dp_world_size: Optional[int] = None,
-            num_dp_groups: Optional[int] = None,
-            dp_rank: Optional[int] = None,
-            rank_id: Optional[int] = None,
+        self,
+        client_id: str,
+        controller_infos: ZMQServerInfo | dict[Any, ZMQServerInfo],
+        storage_infos: ZMQServerInfo | dict[Any, ZMQServerInfo],
+        dp_world_size: Optional[int] = None,
+        num_dp_groups: Optional[int] = None,
+        dp_rank: Optional[int] = None,
+        rank_id: Optional[int] = None,
     ):
-
         self.client_id = client_id  # 方便debug，记录请求来源
         self.controller_infos = controller_infos
         self.storage_infos = storage_infos
@@ -1095,24 +1131,37 @@ class TransferQueueClient:
         self.controller_id_to_socket = {}  # {id: socket}
         self.storage_id_to_socket = {}  # {id: socket}
 
-        def _connect_to_server(server_infos: Union[ZMQServerInfo, Dict[Any, ZMQServerInfo]], role: TransferQueueRole,
-                               socket_name=""):
+        def _connect_to_server(
+            server_infos: ZMQServerInfo | dict[Any, ZMQServerInfo],
+            role: TransferQueueRole,
+            socket_name="",
+        ):
             server_infos = server_infos if isinstance(server_infos, dict) else {0: server_infos}
             for info in server_infos.values():
                 try:
                     address = f"tcp://{info.ip}:{info.ports.get(socket_name)}"
                     sock = create_zmq_socket(
-                        self.zmq_context, zmq.DEALER, identity=f"{self.client_id}_to_{info.id}_{uuid4()}".encode()
+                        self.zmq_context,
+                        zmq.DEALER,
+                        identity=f"{self.client_id}_to_{info.id}_{uuid4()}".encode(),
                     )
                     sock.connect(address)
-                    sock_mapping = self.controller_id_to_socket if role == TransferQueueRole.CONTROLLER else self.storage_id_to_socket
+                    sock_mapping = (
+                        self.controller_id_to_socket
+                        if role == TransferQueueRole.CONTROLLER
+                        else self.storage_id_to_socket
+                    )
                     sock_mapping[info.id] = sock
                     logger.info(f"Client {self.client_id} connected to {role} {info.id} at {address}")
                 except Exception as e:
                     logger.error(f"Failed to connected to {role} {info.id}: {e}")
 
         _connect_to_server(self.storage_infos, TransferQueueRole.STORAGE, socket_name="put_get_socket")
-        _connect_to_server(self.controller_infos, TransferQueueRole.CONTROLLER, socket_name="request_handle_socket")
+        _connect_to_server(
+            self.controller_infos,
+            TransferQueueRole.CONTROLLER,
+            socket_name="request_handle_socket",
+        )
 
     def put(self, data: TensorDict, metadata: ExperienceMeta):
         """
@@ -1134,25 +1183,25 @@ class TransferQueueClient:
         # 利用ExperienceMeta的storage_unit_index_map进行数据分组
         for su_rank, index_data in metadata.storage_unit_index_map.items():
             storage_data[su_rank] = {
-                'row': [],
-                'col': [],
-                'item': [],
+                "row": [],
+                "col": [],
+                "item": [],
             }
 
             # 为每个存储单元准备要写入的数据
-            for i, global_idx in enumerate(index_data['global_indexes']):
-                local_idx = index_data['local_indexes'][i]
+            for i, global_idx in enumerate(index_data["global_indexes"]):
+                local_idx = index_data["local_indexes"][i]
 
                 # 将数据按列拆分
-                for col in index_data['columns']:
+                for col in index_data["columns"]:
                     # 获取该列的数据
-                    idx = (data['global_indexes'] == global_idx).nonzero().item()
+                    idx = (data["global_indexes"] == global_idx).nonzero().item()
                     item = data[col][idx]
 
                     # 添加到存储单元的数据列表中
-                    storage_data[su_rank]['row'].append(local_idx)
-                    storage_data[su_rank]['col'].append(col)
-                    storage_data[su_rank]['item'].append(item)
+                    storage_data[su_rank]["row"].append(local_idx)
+                    storage_data[su_rank]["col"].append(col)
+                    storage_data[su_rank]["item"].append(item)
 
         # 2. 向每个存储单元发送数据
         for su_rank, su_data in storage_data.items():
@@ -1167,9 +1216,7 @@ class TransferQueueClient:
                 request_type=ZMQRequestType.PUT_DATA,
                 sender_id=self.client_id,
                 receiver_id=str(su_rank),
-                body={
-                    'data_parts': su_data
-                }
+                body={"data_parts": su_data},
             ).serialize()
 
             try:
@@ -1182,34 +1229,48 @@ class TransferQueueClient:
                 serialized_body = storage_socket.recv()
                 response_msg = ZMQMessage.deserialize(serialized_body)
 
-                if response_msg.request_type != ZMQRequestType.PUT_DATA_RESPONSE or not response_msg.body[
-                    'message']:
+                if response_msg.request_type != ZMQRequestType.PUT_DATA_RESPONSE or not response_msg.body["message"]:
                     raise RuntimeError(
-                        f"Failed to put data to storage unit {su_rank}: {response_msg.body.get('message', 'Unknown error')}")
+                        f"Failed to put data to storage unit {su_rank}: "
+                        f"{response_msg.body.get('message', 'Unknown error')}"
+                    )
             except Exception as e:
-                raise RuntimeError(f"Error in put to storage unit {su_rank}: {str(e)}")
+                raise RuntimeError(f"Error in put to storage unit {su_rank}: {str(e)}") from e
 
     # DEPRECATED：第一阶段无需设计此函数
-    # def get(self, data_columns:List[str], experience_count:int, dp_world_size:int, num_dp_groups:int=None,  rank_id:int=None,  get_n_samples=False, schedule_policy:str='DP_balance', *args, **kwargs) -> (TensorDict, ExperienceMeta, int):
+    # def get(
+    #     self,
+    #     data_columns: list[str],
+    #     experience_count: int,
+    #     dp_world_size: int,
+    #     num_dp_groups: int=None,
+    #     rank_id: int=None,
+    #     get_n_samples: bool=False,
+    #     schedule_policy: str='DP_balance',
+    #     *args,
+    #     **kwargs,
+    # ) -> (TensorDict, ExperienceMeta, int):
     #     # 获取对应的meta data和数据，封装了get_meta和get_data两个步骤
     #     # 这里DP相关的配置用来支持不同的数据获取方式：
-    #     # 方式1. 每个worker进程自己向主控发起数据获取请求，dp_rank用来区分来自不同dp域的请求，dp_size作为计数器，统计一个batch的数据是否被DP域内所有rank拿走过一遍
+    #     # 方式1. 每个worker进程自己向主控发起数据获取请求，dp_rank用来区分来自不同dp域的请求，dp_size作为计数器，
+    #     # 统计一个batch的数据是否被DP域内所有rank拿走过一遍
     #
-    #     metadata, current_global_step = self.get_meta(data_columns, experience_count, dp_world_size, num_dp_groups, rank_id)
+    #     metadata, current_global_step = self.get_meta(
+    #         data_columns, experience_count, dp_world_size, num_dp_groups, rank_id)
     #     data = self.get_data(metadata)
     #     return data, metadata, current_global_step
 
     def get_meta(
-            self,
-            data_columns: List[str],
-            experience_count: int,
-            global_step:int,
-            dp_world_size: int,
-            get_n_samples: bool = False,
-            task_name: str = None,
-            schedule_policy: str = 'DP_balance',
-            *args,
-            **kwargs,
+        self,
+        data_columns: list[str],
+        experience_count: int,
+        global_step: int,
+        dp_world_size: int,
+        get_n_samples: bool = False,
+        task_name: str = None,
+        schedule_policy: str = "DP_balance",
+        *args,
+        **kwargs,
     ) -> ExperienceMeta:
         """
         只有主控拿到全部数据的meta data，再通过Dispatch分发metadata给各个worker，此时不需要指定dp_rank和dp_size
@@ -1217,7 +1278,8 @@ class TransferQueueClient:
         内部逻辑：
         1. 建立与Controller的连接
         2. 向Controller发送数据获取请求，获取meta data
-        NOTE(hz): 按照讨论，controller跟wg绑定，get_meta在主控调用，主控可以拿到全局的wg和controller，意味着client只跟唯一的controller绑定
+        NOTE(hz): 按照讨论，controller跟wg绑定，get_meta在主控调用，主控可以拿到全局的wg和controller，
+        意味着client只跟唯一的controller绑定
         """
         # metadata = ExperienceMeta()
         # return metadata, current_global_step
@@ -1234,14 +1296,14 @@ class TransferQueueClient:
             sender_id=self.client_id,
             receiver_id=controller_id,
             body={
-                'data_columns': data_columns,
-                'experience_count': experience_count,
-                'global_step': global_step,
-                'dp_world_size': dp_world_size,
-                'get_n_samples': get_n_samples,
-                'task_name': task_name,
-                'schedule_policy': schedule_policy
-            }
+                "data_columns": data_columns,
+                "experience_count": experience_count,
+                "global_step": global_step,
+                "dp_world_size": dp_world_size,
+                "get_n_samples": get_n_samples,
+                "task_name": task_name,
+                "schedule_policy": schedule_policy,
+            },
         ).serialize()
 
         try:
@@ -1254,14 +1316,16 @@ class TransferQueueClient:
             response_msg = ZMQMessage.deserialize(serialized_body)
             logger.info(f"Clinet get datameta response: {response_msg}")
 
-            if response_msg.request_type == ZMQRequestType.GET_META_RESPONSE.value and response_msg.body[
-                'status'] == 'SUCCESS':
-                metadata = response_msg.body['metadata']
+            if (
+                response_msg.request_type == ZMQRequestType.GET_META_RESPONSE.value
+                and response_msg.body["status"] == "SUCCESS"
+            ):
+                metadata = response_msg.body["metadata"]
                 return metadata
             else:
                 raise RuntimeError(f"Failed to get metadata: {response_msg.body.get('message', 'Unknown error')}")
         except Exception as e:
-            raise RuntimeError(f"Error in get_meta: {str(e)}")
+            raise RuntimeError(f"Error in get_meta: {str(e)}") from e
 
     def get_data(self, metadata: ExperienceMeta) -> TensorDict:
         """
@@ -1282,24 +1346,21 @@ class TransferQueueClient:
                 raise RuntimeError(f"Storage unit {su_rank} not available")
             socket = self.storage_id_to_socket[str(su_rank)]
 
-            global_indexes = index_data['global_indexes']
-            local_indexes = index_data['local_indexes']
-            columns = index_data['columns']
+            global_indexes = index_data["global_indexes"]
+            local_indexes = index_data["local_indexes"]
+            columns = index_data["columns"]
 
             # 创建ZMQ消息
             request_msg = ZMQMessage.create(
                 request_type=ZMQRequestType.GET_DATA,
                 sender_id=self.client_id,
                 receiver_id=str(su_rank),
-                body={
-                    'local_indexes': local_indexes,
-                    'columns': columns
-                }
+                body={"local_indexes": local_indexes, "columns": columns},
             ).serialize()
 
             try:
                 # 发送请求
-                logger.info(f"Prepare send get data request to storage")
+                logger.info("Prepare send get data request to storage")
                 socket.send(request_msg)
 
                 # 接收响应
@@ -1307,10 +1368,12 @@ class TransferQueueClient:
                 response_msg = ZMQMessage.deserialize(serialized_body)
                 logger.info(f"get data response_msg: {response_msg}")
 
-                if response_msg.request_type == ZMQRequestType.GET_DATA_RESPONSE and response_msg.body[
-                    'message']['status'] == 'SUCCESS':
+                if (
+                    response_msg.request_type == ZMQRequestType.GET_DATA_RESPONSE
+                    and response_msg.body["message"]["status"] == "SUCCESS"
+                ):
                     # 存储该存储单元返回的数据
-                    su_data = response_msg.body['message']['data']
+                    su_data = response_msg.body["message"]["data"]
                     # 将数据与原始索引关联
                     for idx, local_idx in enumerate(local_indexes):
                         global_idx = global_indexes[idx]
@@ -1320,9 +1383,11 @@ class TransferQueueClient:
                             storage_data[global_idx][col] = su_data[local_idx][col]
                 else:
                     raise RuntimeError(
-                        f"Failed to get data from storage unit {su_rank}: {response_msg.body.get('message', 'Unknown error')}")
+                        f"Failed to get data from storage unit {su_rank}: "
+                        f"{response_msg.body.get('message', 'Unknown error')}"
+                    )
             except Exception as e:
-                raise RuntimeError(f"Error getting data from storage unit {su_rank}: {str(e)}")
+                raise RuntimeError(f"Error getting data from storage unit {su_rank}: {str(e)}") from e
 
         # # 2. 按global_indexes顺序合并数据
         # ordered_data = {col: [] for col in metadata.columns}
@@ -1343,13 +1408,10 @@ class TransferQueueClient:
             for col in metadata.columns:
                 ordered_data[col].append(storage_data[idx][col])
 
-        tensor_data = {
-            col: torch.tensor(v)
-            for col, v in ordered_data.items()
-        }
+        tensor_data = {col: torch.tensor(v) for col, v in ordered_data.items()}
 
         # 为tensor_data每个tensor的batch维增加索引信息
-        tensor_data['global_indexes'] = torch.tensor(indexes)
+        tensor_data["global_indexes"] = torch.tensor(indexes)
 
         # 创建TensorDict
         """
@@ -1360,14 +1422,20 @@ class TransferQueueClient:
             "global_indexes": torch.Tensor([7, 4, 6, 5]), # prompt_token_ids/response_token_ids每条样本对应的global_idx
         }
         NOTE: 为什么要记录global_indexes？
-              - 由于在具体任务中可能会对batch进行rearange操作，会调整batch内样本顺序，global_indexes可以记录这种顺序的调整，便于后续把数据放回
+              - 由于在具体任务中可能会对batch进行rearange操作，会调整batch内样本顺序，
+                global_indexes可以记录这种顺序的调整，便于后续把数据放回
                 Storage Unit时从过metadata（根据global_indexes）找到对应的Storage Unit
         """
         tensor_dict = TensorDict(tensor_data, batch_size=len(storage_data))
         return tensor_dict
 
-    def put_prompts(self, data: TensorDict, data_columns: list[str], global_step: int = 0,
-                    n_samples_per_prompt: int = 1):
+    def put_prompts(
+        self,
+        data: TensorDict,
+        data_columns: list[str],
+        global_step: int = 0,
+        n_samples_per_prompt: int = 1,
+    ):
         """
         向controller发送消息构造metadata，再根据metadata写入storage units
 
@@ -1394,7 +1462,7 @@ class TransferQueueClient:
                 "experience_count": data.batch_size[0],
                 "global_step": global_step,
                 "n_samples_per_prompt": n_samples_per_prompt,
-            }
+            },
         ).serialize()
 
         # 2. 发送请求到任意一个controller
@@ -1412,10 +1480,16 @@ class TransferQueueClient:
         logger.info("Clinet put prompts finished!")
 
     # DEPRECATED：第一阶段无需设计此函数，后续dataloader等抽象作为recipe提供一种极致性能实现
-    # def get_data_loader(self, data_columns:List[str], experience_count:int, dp_world_size:int, num_dp_groups:int=None,  rank_id:int=None) -> StreamDataLoader:
+    # def get_data_loader(
+    #     self,
+    #     data_columns: list[str],
+    #     experience_count: int,
+    #     dp_world_size: int,
+    #     num_dp_groups:int=None,
+    #     rank_id:int=None,
+    # ) -> StreamDataLoader:
     #     # 构造迭代器将get过程进行抽象
     #     pass
-
 
     def check_current_step_consumption(self, global_step):
         # 检查当前global batch是否消耗完
@@ -1440,9 +1514,11 @@ class TransferQueueClient:
 #             pass
 
 
-def process_zmq_server_info(handlers: Dict[Any, Union[TransferQueueController, TransferQueueStorageSimpleUnit]]):
+def process_zmq_server_info(
+    handlers: dict[Any, TransferQueueController | TransferQueueStorageSimpleUnit],
+):
     server_info = {}
-    for name, handlers in handlers.items():
-        server_info[name] = ray.get(handlers.get_zmq_server_info.remote())
+    for name, handler in handlers.items():
+        server_info[name] = ray.get(handler.get_zmq_server_info.remote())
 
     return server_info

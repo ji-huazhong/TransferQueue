@@ -1,10 +1,16 @@
+from threading import Thread
+
+import ray
+import pprint
+from tqdm import tqdm
 from verl.single_controller.ray.base import RayWorkerGroup
+
 
 class ActorWorkerGroup(RayWorkerGroup):
     def __init__(
         self,
-        resource_pool: RayResourcePool,
-        ray_cls_with_init: RayClassWithInitArgs,
+        resource_pool: RayResourcePool,  # noqa: F821
+        ray_cls_with_init: RayClassWithInitArgs,  # noqa: F821
         bin_pack: bool,
         name_prefix: str,
         detached,
@@ -24,9 +30,8 @@ class ActorWorkerGroup(RayWorkerGroup):
             worker_names=worker_names,
             worker_handles=worker_handles,
             ray_wait_register_center_timeout=ray_wait_register_center_timeout,
-            **kwargs
+            **kwargs,
         )
-
 
         ######################################################################################################
         # Data System：初始化数据系统Client
@@ -38,26 +43,34 @@ class ActorWorkerGroup(RayWorkerGroup):
 
     def start(self):
         if self._is_actor:
-            self.process_compute_log_prob_thread = Thread(target=self.compute_log_prob_separated,
-                                                 name="compute_log_prob_thread",
-                                                 daemon=True)
+            self.process_compute_log_prob_thread = Thread(
+                target=self.compute_log_prob_separated,
+                name="compute_log_prob_thread",
+                daemon=True,
+            )
             self.process_compute_log_prob_thread.start()
 
-            self.process_update_actor_thread = Thread(target=self.update_actor_separated,
-                                                 name="update_actor_thread",
-                                                 daemon=True)
+            self.process_update_actor_thread = Thread(
+                target=self.update_actor_separated,
+                name="update_actor_thread",
+                daemon=True,
+            )
             self.process_update_actor_thread.start()
 
         if self._is_rollout:
-            self.process_generate_sequences_thread = Thread(target=self.generate_sequences_separated,
-                                                 name="generate_sequences_thread",
-                                                 daemon=True)
+            self.process_generate_sequences_thread = Thread(
+                target=self.generate_sequences_separated,
+                name="generate_sequences_thread",
+                daemon=True,
+            )
             self.process_generate_sequences_thread.start()
 
         if self._is_ref:
-            self.process_compute_ref_log_prob_thread = Thread(target=self.compute_ref_log_prob_separated,
-                                                 name="compute_ref_log_prob",
-                                                 daemon=True)
+            self.process_compute_ref_log_prob_thread = Thread(
+                target=self.compute_ref_log_prob_separated,
+                name="compute_ref_log_prob",
+                daemon=True,
+            )
             self.process_compute_ref_log_prob_thread.start()
 
     def compute_log_prob_separated(self):
@@ -85,7 +98,9 @@ class ActorWorkerGroup(RayWorkerGroup):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        if self.val_reward_fn is not None and self.config.trainer.get(
+            "val_before_train", True
+        ):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -94,24 +109,33 @@ class ActorWorkerGroup(RayWorkerGroup):
                 return
 
         # add tqdm
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
-
+        progress_bar = tqdm(  # noqa: F841
+            total=self.total_training_steps,
+            initial=self.global_steps,
+            desc="Training Progress",
+        )
 
         while True:
-            with marked_timer("step", timing_raw):
-                with marked_timer("old_log_prob", timing_raw, color="blue"):
+            with marked_timer("step", timing_raw):  # noqa: F821
+                with marked_timer("old_log_prob", timing_raw, color="blue"):  # noqa: F821
                     ##########################################################################################
                     # Data System：在主控中根据算法要求，为每一个任务取出对应的MetaData，并基于现有Dispatch功能分发
                     ##########################################################################################
-                    log_prob_data_meta, current_global_step = self.data_system_client.get_meta(
-                        data_columns=['prompt_token_ids', 'attention_mask', 'position_ids'],
-                        experience_count=self.config.data.actor_compute_log_prob_dispatch_size,  # 每路DP的样本条数; 在分离场景为mbs,
-                        dp_world_size=self.config.actor.rollout.dp_world_size,  # DP总数
-                        num_dp_groups=None,  # 通过主控分发，无需声明DP域大小
-                        dp_rank=None,  # 通过主控分发，无需指定自身的DP rank
-                        rank_id=None,
-                        get_n_samples=False,
-                        schedule_policy='DP_balance'
+                    log_prob_data_meta, current_global_step = (
+                        self.data_system_client.get_meta(
+                            data_columns=[
+                                "prompt_token_ids",
+                                "attention_mask",
+                                "position_ids",
+                            ],
+                            experience_count=self.config.data.actor_compute_log_prob_dispatch_size,  # 每路DP的样本条数; 在分离场景为mbs,
+                            dp_world_size=self.config.actor.rollout.dp_world_size,  # DP总数
+                            num_dp_groups=None,  # 通过主控分发，无需声明DP域大小
+                            dp_rank=None,  # 通过主控分发，无需指定自身的DP rank
+                            rank_id=None,
+                            get_n_samples=False,
+                            schedule_policy="DP_balance",
+                        )
                     )
                     self.actor_rollout_wg.compute_log_prob(log_prob_data_meta)
 
@@ -123,5 +147,3 @@ class ActorWorkerGroup(RayWorkerGroup):
 
 class RolloutWorkerGroup(RayWorkerGroup):
     pass
-
-

@@ -2,7 +2,7 @@ from queue import Queue
 from omegaconf import OmegaConf
 
 from single_controller.ray import RayWorkerGroup, RayClassWithInitArgs, RayResourcePool
-from single_controller.ray.base import create_colocated_worker_cls, create_colocated_worker_cls_fused
+from single_controller.ray.base import create_colocated_worker_cls_fused
 from workers.megatron_worker_demo import ActorRolloutRefWorker
 
 
@@ -16,7 +16,7 @@ class SentenceIterator:
             "阅读是获取知识的最佳途径之一。",
             "大自然的美景总是让人心旷神怡。",
             "科技创新正在改变我们的生活方式。",
-            "友谊是人生中最珍贵的财富之一。"
+            "友谊是人生中最珍贵的财富之一。",
         ]
         self.start_index = 0
         self.batch_size = train_batch_size
@@ -27,7 +27,9 @@ class SentenceIterator:
 
     def __next__(self):
         if self.start_index < self.count:
-            result = self.sentences[self.start_index:self.start_index+self.batch_size]
+            result = self.sentences[
+                self.start_index : self.start_index + self.batch_size
+            ]
             self.start_index += self.batch_size
             return result
         else:
@@ -36,8 +38,8 @@ class SentenceIterator:
 
 class RayPPOTrainer:
     def __init__(
-            self,
-            config,
+        self,
+        config,
     ):
         """
         Initialize distributed PPO trainer with Ray backend.
@@ -62,7 +64,9 @@ class RayPPOTrainer:
         #################################################################################
         # Data System：提供iteration感知能力，记录当前actor训练的iteration
         #################################################################################
-        self.iteration_record_queue = Queue(maxsize=self.config.algorithm.staleness_threshold)
+        self.iteration_record_queue = Queue(
+            maxsize=self.config.algorithm.staleness_threshold
+        )
 
         self.train_dataloader = SentenceIterator(self.config.data.train_batch_size)
 
@@ -70,16 +74,25 @@ class RayPPOTrainer:
     # Data System：初始化逻辑
     #################################################################################
     def _initialize_data_system(self):
-        from utils.data_system import TransferQueueController, TransferQueueStorageSimpleUnit
+        from utils.data_system import (
+            TransferQueueController,
+            TransferQueueStorageSimpleUnit,
+        )
+
         # 1. 初始化TransferQueueStorage
-        total_storage_size = (self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n *
-                              self.config.algorithm.staleness_threshold)
+        total_storage_size = (
+            self.config.data.train_batch_size
+            * self.config.actor_rollout_ref.rollout.n
+            * self.config.algorithm.staleness_threshold
+        )
         self.data_system_storage_units = {}
         for storage_unit_rank in range(self.config.trainer.num_data_storage_units):
             # TransferQueueStorage通过Ray拉起，是一个ray.remote修饰的类
             storage_node = TransferQueueStorageSimpleUnit.remote(
                 storage_unit_id=storage_unit_rank,
-                storage_size=total_storage_size // self.config.trainer.num_data_storage_units + 1
+                storage_size=total_storage_size
+                // self.config.trainer.num_data_storage_units
+                + 1,
             )
             self.data_system_storage_units[storage_unit_rank] = storage_node
 
@@ -87,20 +100,26 @@ class RayPPOTrainer:
         # 这里支持多controller实例以实现负载均衡，支持大规模扩展。不同controller可分配至不同RL计算任务
         self.data_system_controllers = {}
         for controller_rank in range(self.config.trainer.num_data_controllers):
-            self.data_system_controllers[controller_rank] = TransferQueueController.remote(
-                controller_id=controller_rank,
-                num_storage_units=self.config.trainer.num_data_storage_units,
-                global_batch_size=self.config.data.train_batch_size,
-                num_global_batch=self.config.algorithm.staleness_threshold,
-                num_n_samples=self.config.actor_rollout_ref.rollout.n,
+            self.data_system_controllers[controller_rank] = (
+                TransferQueueController.remote(
+                    controller_id=controller_rank,
+                    num_storage_units=self.config.trainer.num_data_storage_units,
+                    global_batch_size=self.config.data.train_batch_size,
+                    num_global_batch=self.config.algorithm.staleness_threshold,
+                    num_n_samples=self.config.actor_rollout_ref.rollout.n,
+                )
             )
 
         # 3. 将Controller注册至各个Storage
         # 每个Storage Unit拿到所有Controller的handler，通过Ray拿到对应的IP+端口，之后建立ZMQ Socket进行消息传输
         from utils.data_system import process_zmq_server_info
 
-        self.data_system_controller_infos = process_zmq_server_info(self.data_system_controllers)
-        self.data_system_storage_unit_infos = process_zmq_server_info(self.data_system_storage_units)
+        self.data_system_controller_infos = process_zmq_server_info(
+            self.data_system_controllers
+        )
+        self.data_system_storage_unit_infos = process_zmq_server_info(
+            self.data_system_storage_units
+        )
 
         # TODO: 待实现后打开注释
         # ray.get([storage_unit.register_controller_info.remote(self.data_system_controller_infos) for storage_unit in
@@ -108,14 +127,15 @@ class RayPPOTrainer:
 
         # 4. 创建Client
         from utils.data_system import TransferQueueClient
+
         self.data_system_client = TransferQueueClient(
-            client_id='Trainer',
+            client_id="Trainer",
             controller_info=self.data_system_controller_infos[0],
             storage_info=self.data_system_storage_unit_infos,
             dp_world_size=None,
             num_dp_groups=None,
             dp_rank=None,
-            rank_id=None
+            rank_id=None,
         )
 
     def init_workers(self):
@@ -130,28 +150,40 @@ class RayPPOTrainer:
             cls=ActorRolloutRefWorker,
             config=self.config.actor_rollout_ref,
             role="actor_rollout",
-            data_system_controller_infos=self.data_system_controller_infos[ray_worker_group_count % len(self.data_system_controller_infos)],
+            data_system_controller_infos=self.data_system_controller_infos[
+                ray_worker_group_count % len(self.data_system_controller_infos)
+            ],
             data_system_storage_unit_infos=self.data_system_storage_unit_infos,
         )
 
         # resource_pool = RayResourcePool(process_on_nodes=[2])
-        resource_pool = RayResourcePool(process_on_nodes=[self.config.trainer.num_gpus_per_node])
+        resource_pool = RayResourcePool(
+            process_on_nodes=[self.config.trainer.num_gpus_per_node]
+        )
         # create colocated workers
         cls_dict = {"actor_rollout": actor_rollout_ref_cls}
         ray_cls_with_init = create_colocated_worker_cls_fused(cls_dict)
 
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
-        if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
-            wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
+        if (
+            OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout")
+            is not None
+        ):
+            wg_kwargs["ray_wait_register_center_timeout"] = (
+                self.config.trainer.ray_wait_register_center_timeout
+            )
 
-        wg_dict = RayWorkerGroup(resource_pool=resource_pool,
-                                 ray_cls_with_init=ray_cls_with_init,
-                                 device_name=self.device_name,
-                                 data_system_controller_infos=self.data_system_controller_infos[ray_worker_group_count % len(self.data_system_controller_infos)],
-                                 data_system_storage_unit_infos=self.data_system_storage_unit_infos,
-                                 iteration_record_queue=self.iteration_record_queue,
-                                 **wg_kwargs,
-                                 )
+        wg_dict = RayWorkerGroup(
+            resource_pool=resource_pool,
+            ray_cls_with_init=ray_cls_with_init,
+            device_name=self.device_name,
+            data_system_controller_infos=self.data_system_controller_infos[
+                ray_worker_group_count % len(self.data_system_controller_infos)
+            ],
+            data_system_storage_unit_infos=self.data_system_storage_unit_infos,
+            iteration_record_queue=self.iteration_record_queue,
+            **wg_kwargs,
+        )
         spawn_wg = wg_dict.spawn(prefix_set=cls_dict.keys())
 
         self.actor_rollout_wg = spawn_wg["actor_rollout"]
@@ -165,7 +197,6 @@ class RayPPOTrainer:
     # 修改量较小，成本较低
     ######################################################################################################
     def fit_collocated_with_data_system(self):
-
         self.global_steps = 0
 
         # # add tqdm
@@ -181,22 +212,33 @@ class RayPPOTrainer:
                 # 问题：prompt_batch的大小是global_batch_size？跟experience_count的关系？是否能兼容verl worker_group dispatch和collect的逻辑？
                 # 共卡场景下 prompt_batch的大小就是global_batch_size，experience_count=global_batch_size
                 # TODO:构造一个假的storage_unit
-                self.data_system_client.put_prompts(data=prompt_batch, global_step=self.global_steps,
-                                                    n_samples_per_prompt=self.config.actor_rollout_ref.rollout.n)
+                self.data_system_client.put_prompts(
+                    data=prompt_batch,
+                    global_step=self.global_steps,
+                    n_samples_per_prompt=self.config.actor_rollout_ref.rollout.n,
+                )
 
                 data_meta = self.data_system_client.get_meta(
-                    data_columns=['prompt_token_ids', 'responses_token_ids', 'attention_mask', 'position_ids'],
-                    experience_count=self.config.data.train_batch_size / self.config.actor_rollout_ref.rollout.dp_world_size,
+                    data_columns=[
+                        "prompt_token_ids",
+                        "responses_token_ids",
+                        "attention_mask",
+                        "position_ids",
+                    ],
+                    experience_count=self.config.data.train_batch_size
+                    / self.config.actor_rollout_ref.rollout.dp_world_size,
                     # 每路DP的样本条数; 在共置场景为Global Batch Size / DP
                     dp_world_size=self.config.actor_rollout_ref.rollout.dp_world_size,  # DP总数
                     get_n_samples=False,
-                    task_name='compute_log_prob',
-                    schedule_policy='DP_balance'
+                    task_name="compute_log_prob",
+                    schedule_policy="DP_balance",
                 )
 
-                print(f"trainer data_meta size: {data_meta.size} | global index is: {data_meta.global_indexes} "
-                      f"| local index: {data_meta.local_indexes} | data cloumn: {data_meta.columns} "
-                      f"| storage unit rank: {data_meta.storage_unit_rank}")
+                print(
+                    f"trainer data_meta size: {data_meta.size} | global index is: {data_meta.global_indexes} "
+                    f"| local index: {data_meta.local_indexes} | data cloumn: {data_meta.columns} "
+                    f"| storage unit rank: {data_meta.storage_unit_rank}"
+                )
                 ## trainer data_meta size: 4 | global index is: [0, 1, 2, 3] | local index: [0, 1, 2, 3] | data cloumn: ['prompt_token_ids', 'responses_token_ids', 'attention_mask', 'position_ids'] | storage unit rank: [0, 0, 0, 0] ##
                 old_log_prob = self.actor_rollout_wg.compute_log_prob(data_meta)
                 print(f"old_log_prob: {old_log_prob}")

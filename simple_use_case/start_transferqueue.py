@@ -10,24 +10,28 @@ from tensordict import TensorDict
 
 parent_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(parent_dir))
-from transfer_queue.data_system import TransferQueueController, TransferQueueStorageSimpleUnit, process_zmq_server_info
 
+from transfer_queue.data_system import (  # noqa: E402
+    TransferQueueController,
+    TransferQueueStorageSimpleUnit,
+    process_zmq_server_info,
+)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-ray.init(runtime_env={"env_vars":{"RAY_DEBUG": "1", "RAY_DEDUP_LOGS":"0"}})
+ray.init(runtime_env={"env_vars": {"RAY_DEBUG": "1", "RAY_DEDUP_LOGS": "0"}})
 
 
 def initialize_data_system(config):
     # 1. 初始化TransferQueueStorage
-    total_storage_size = (config.global_batch_size * config.num_global_batch)
+    total_storage_size = config.global_batch_size * config.num_global_batch
     data_system_storage_units = {}
     for storage_unit_rank in range(config.num_data_storage_units):
         # TransferQueueStorage通过Ray拉起，是一个ray.remote修饰的类
         storage_node = TransferQueueStorageSimpleUnit.remote(
             storage_unit_id=storage_unit_rank,  # FIXME 临时回滚：后续StorageUnit不在主控指定ID
-            storage_size=math.ceil(total_storage_size / config.num_data_storage_units)
+            storage_size=math.ceil(total_storage_size / config.num_data_storage_units),
         )
         data_system_storage_units[storage_unit_rank] = storage_node
         logger.info(f"TransferQueueStorageSimpleUnit #{storage_unit_rank} has been created.")
@@ -50,19 +54,26 @@ def initialize_data_system(config):
     data_system_controller_infos = process_zmq_server_info(data_system_controllers)
     data_system_storage_unit_infos = process_zmq_server_info(data_system_storage_units)
 
-    ray.get([storage_unit.register_controller_info.remote(data_system_controller_infos) for storage_unit in
-             data_system_storage_units.values()])
+    ray.get(
+        [
+            storage_unit.register_controller_info.remote(data_system_controller_infos)
+            for storage_unit in data_system_storage_units.values()
+        ]
+    )
 
     # 4. 创建Client
     from transfer_queue.data_system import TransferQueueClient
+
     data_system_client = TransferQueueClient(
-        client_id='Trainer',
-        controller_infos=data_system_controller_infos[0],  # TODO: 主控Client感知所有controller，WorkerGroup和Worker的Client感知一个controller
+        client_id="Trainer",
+        controller_infos=data_system_controller_infos[
+            0
+        ],  # TODO: 主控Client感知所有controller，WorkerGroup和Worker的Client感知一个controller
         storage_infos=data_system_storage_unit_infos,
         dp_world_size=None,
         num_dp_groups=None,
         dp_rank=None,
-        rank_id=None
+        rank_id=None,
     )
 
     return data_system_controllers, data_system_storage_units, data_system_client
@@ -88,35 +99,41 @@ def do_some_tasks(data_meta, data_system_client):
 
 
 def main(config):
-
     # Data System：基于Ray拉起Controller以及Storage
     data_system_controllers, data_system_storage_units, data_system_client = initialize_data_system(config)
 
     import time
+
     time.sleep(3)
 
     input_ids = torch.tensor([1, 2, 3, 4])
     prompt_batch = TensorDict({"input_ids": input_ids}, batch_size=input_ids.size())
 
-    data_system_client.put_prompts(data=prompt_batch, data_columns=["input_ids"], global_step=0, n_samples_per_prompt=1)
+    data_system_client.put_prompts(
+        data=prompt_batch,
+        data_columns=["input_ids"],
+        global_step=0,
+        n_samples_per_prompt=1,
+    )
     logger.info("demo put prompts ok! ")
     time.sleep(3)
 
     prompt_meta = data_system_client.get_meta(
-        data_columns=['input_ids'],
+        data_columns=["input_ids"],
         experience_count=config.global_batch_size,
         global_step=0,
         dp_world_size=1,  # DP总数
         get_n_samples=False,
-        task_name='task1',
-        schedule_policy='random_strategy'
+        task_name="task1",
+        schedule_policy="random_strategy",
     )
     logger.info("demo get meta ok! ")
-    new_data_meta = do_some_tasks(prompt_meta, data_system_client)
+    do_some_tasks(prompt_meta, data_system_client)
     print("demo done!")
 
     # TODO: clear data
-    # 对于主控的client，通知所有controller进行数据状态清空，主控返回metadata；client再根据metadata通知所有storage unit清空
+    # 对于主控的client，通知所有controller进行数据状态清空，主控返回metadata；
+    # client再根据metadata通知所有storage unit清空
     # client选择一个主controller拿到metadata，其他的controller直接清空不用返回metadata即可
     # data_system_client.clear(global_step=0)
 
