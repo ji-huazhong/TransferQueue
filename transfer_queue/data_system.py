@@ -6,7 +6,7 @@ import time
 from abc import ABC
 from dataclasses import dataclass, field
 from threading import Thread
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 from uuid import uuid4
 
 import numpy as np
@@ -1515,7 +1515,7 @@ class TransferQueueClient:
 
 
 def process_zmq_server_info(
-    handlers: dict[Any, TransferQueueController | TransferQueueStorageSimpleUnit],
+    handlers: dict[Any, Union[TransferQueueController, TransferQueueStorageSimpleUnit]],
 ):
     server_info = {}
     for name, handler in handlers.items():
