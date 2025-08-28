@@ -1,15 +1,16 @@
-import time
-import socket
-import warnings
-from typing import Any, Optional, Dict, List, Union
-from typing_extensions import Self
-from enum import Enum
-import psutil
-import uuid
-import zmq
 import pickle
-from datetime import datetime
+import socket
+import time
+import uuid
+import warnings
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Optional
+
+import psutil
+import zmq
+from typing_extensions import Self
+
 # TODO:（lxm）循环依赖，讨论TransferQueueRole放到zmq_utils中是否合适
 # from .data_system import TransferQueueRole
 
@@ -36,8 +37,8 @@ class ZMQRequestType(ExplicitEnum):
     # TODO @jianjun: 添加注释，说明每个Request type可能对应的通信过程
 
     # 握手相关
-    HANDSHAKE = "HANDSHAKE"               # TransferQueueStorageUnit -> TransferQueueController
-    HANDSHAKE_ACK = "HANDSHAKE_ACK"       # TransferQueueController  -> TransferQueueStorageUnit
+    HANDSHAKE = "HANDSHAKE"  # TransferQueueStorageUnit -> TransferQueueController
+    HANDSHAKE_ACK = "HANDSHAKE_ACK"  # TransferQueueController  -> TransferQueueStorageUnit
 
     # 数据操作相关
     GET_DATA = "GET"
@@ -72,16 +73,11 @@ class ZMQServerInfo:
     role: TransferQueueRole
     id: str
     ip: str
-    ports: Dict[str, str]
+    ports: dict[str, str]
 
     @classmethod
-    def create(cls, role: TransferQueueRole, id: str, ip: str, ports:  Dict[str, str]) -> Self:
-        return cls(
-            role=role,
-            id=id,
-            ip=ip,
-            ports=ports
-        )
+    def create(cls, role: TransferQueueRole, id: str, ip: str, ports: dict[str, str]) -> Self:
+        return cls(role=role, id=id, ip=ip, ports=ports)
 
     def to_addr(self, port_name: str) -> str:
         return f"tcp://{self.ip}:{self.ports[port_name]}"
@@ -97,17 +93,24 @@ class ZMQServerInfo:
     def __str__(self) -> str:
         return f"ZMQSocketInfo(role={self.role}, id={self.id}, ip={self.ip}, ports={self.ports})"
 
+
 @dataclass
 class ZMQMessage:
     request_type: ZMQRequestType
     sender_id: str
-    receiver_id: Union[str, None]
-    body: Dict[str, Any]
+    receiver_id: str | None
+    body: dict[str, Any]
     request_id: str
     timestamp: float
 
     @classmethod
-    def create(cls, request_type: ZMQRequestType, sender_id: str, body: Dict[str, Any], receiver_id: Optional[Union[str, None]] = None) -> "ZMQMessage":
+    def create(
+        cls,
+        request_type: ZMQRequestType,
+        sender_id: str,
+        body: dict[str, Any],
+        receiver_id: Optional[str | None] = None,
+    ) -> "ZMQMessage":
         return cls(
             request_type=request_type,
             sender_id=sender_id,
@@ -122,7 +125,7 @@ class ZMQMessage:
         return pickle.dumps(self)
 
     @classmethod
-    def deserialize(cls, data: Union[bytes, List[bytes]]):
+    def deserialize(cls, data: bytes | list[bytes]):
         """
         使用pickle反序列化ZMQMessage
         """
@@ -130,11 +133,12 @@ class ZMQMessage:
             # 处理多个字节流的情况，按顺序反序列化每个字节流
             result = []
             for d in data:
-                result = result.append(pickle.loads(d))
+                result.append(pickle.loads(d))
             return result
         else:
             # 单个字节流的情况
             return pickle.loads(data)
+
 
 def get_free_port() -> str:
     with socket.socket() as sock:
@@ -163,9 +167,7 @@ def get_node_ip() -> str:
     except Exception:
         pass
 
-    warnings.warn(
-        "Failed to get the IP address, using 0.0.0.0 by default.",
-        stacklevel=2)
+    warnings.warn("Failed to get the IP address, using 0.0.0.0 by default.", stacklevel=2)
     return "0.0.0.0"
 
 

@@ -1,6 +1,6 @@
 import os
 import datetime
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig
 
 import torch
 
@@ -25,7 +25,9 @@ def register_faker(dispatch_mode):
             dp_world_size = torch.distributed.get_world_size()
             new_args = split_args(dp_world_size, *args)
             return func(*new_args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
@@ -34,6 +36,7 @@ class ActorRolloutRefWorker(Worker):
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
     or a hybrid engine based on the config.rollout
     """
+
     ######################################################################################################
     # Data System：入参增加数据系统句柄
     # 理论上，这个Client应该是Base类的能力，不应该属于megatron_workers；
@@ -44,7 +47,14 @@ class ActorRolloutRefWorker(Worker):
     # 一个可能更加合理的抽象: Trainer -> XXWorkerGroup （Ray进程组）-> XXWorker （RL任务）-> BaseWorker -> Adapter -> Megatron
     # 这样可以把数据系统放在BaseWorker里
     ######################################################################################################
-    def __init__(self, config: DictConfig, role: str, data_system_controller_infos, data_system_storage_unit_infos, **kwargs):
+    def __init__(
+        self,
+        config: DictConfig,
+        role: str,
+        data_system_controller_infos,
+        data_system_storage_unit_infos,
+        **kwargs,
+    ):
         Worker.__init__(self)
         self.config = config
 
@@ -59,17 +69,29 @@ class ActorRolloutRefWorker(Worker):
             # rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(
                 backend=get_nccl_backend(),
-                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                timeout=datetime.timedelta(
+                    seconds=self.config.get("nccl_timeout", 600)
+                ),
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
             # 运行demo时需要注释
             # get_torch_device().set_device(rank)
 
         self.role = role
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        assert self.role in [
+            "actor",
+            "rollout",
+            "ref",
+            "actor_rollout",
+            "actor_rollout_ref",
+        ]
 
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
+        self._is_rollout = self.role in [
+            "rollout",
+            "actor_rollout",
+            "actor_rollout_ref",
+        ]
 
         # # normalize config
         # if self._is_actor and self._is_rollout:
@@ -81,7 +103,6 @@ class ActorRolloutRefWorker(Worker):
         #         self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
         #         self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
 
-
         ######################################################################################################
         # Data System：初始化数据系统Client
         ######################################################################################################
@@ -91,23 +112,26 @@ class ActorRolloutRefWorker(Worker):
 
     def _build_data_system_client(self):
         from utils.data_system import TransferQueueClient
+
         self.data_system_client_handlers = TransferQueueClient(
-            client_id='ActorRolloutRefWorker',
+            client_id="ActorRolloutRefWorker",
             controller_info=self.data_system_controller_infos,
             storage_info=self.data_system_storage_unit_infos,
             dp_world_size=None,
             num_dp_groups=None,
             dp_rank=None,
-            rank_id=None
+            rank_id=None,
         )
 
     # TODO: 可以不用构造dispatch_fn，直接在worker group里显式的做chunk --在Dispatch.FAKER_MEGATRON_COMPUTE_PROTO中实现了data_meta的chunk demo
     # 或者构造一个自定义的register，实现dispatch_fn（collect_fn不需要实现，简化了主控的流程） --已构造
     @register(dispatch_mode=Dispatch.FAKER_MEGATRON_COMPUTE_PROTO)
     def compute_log_prob(self, data_meta):
-        print(f"rank {torch.distributed.get_rank()} | data_meta is: {data_meta.global_indexes}| size is {data_meta.size} "
-              f"| local index: {data_meta.local_indexes} | data cloumn: {data_meta.columns} "
-              f"| storage unit rank: {data_meta.storage_unit_rank}")
+        print(
+            f"rank {torch.distributed.get_rank()} | data_meta is: {data_meta.global_indexes}| size is {data_meta.size} "
+            f"| local index: {data_meta.local_indexes} | data cloumn: {data_meta.columns} "
+            f"| storage unit rank: {data_meta.storage_unit_rank}"
+        )
         ## rank 0 | data_meta is: [0, 1]| size is 2 | local index: [0, 1] | data cloumn: ['prompt_token_ids', 'responses_token_ids', 'attention_mask', 'position_ids'] | storage unit rank: [0, 0] ##
         ## rank 1 | data_meta is: [2, 3]| size is 2 | local index: [2, 3] | data cloumn: ['prompt_token_ids', 'responses_token_ids', 'attention_mask', 'position_ids'] | storage unit rank: [0, 0] ##
         ######################################################################################################
@@ -130,4 +154,4 @@ class ActorRolloutRefWorker(Worker):
 
         self.data_system_client_handlers.put(data=output, metadata=data_meta)
 
-        get_torch_device().empty_cache()
+        get_torch_device().empty_cache()  # noqa: F821

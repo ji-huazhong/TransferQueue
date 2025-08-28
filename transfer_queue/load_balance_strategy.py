@@ -1,7 +1,8 @@
 # Copyright (c) 2025, HUAWEI CORPORATION. All rights reserved.
 import copy
 import heapq
-from typing import List, Tuple, Optional
+from typing import Optional
+
 import torch
 import torch.distributed as dist
 from torch import Tensor
@@ -9,9 +10,8 @@ from torch import Tensor
 ## ==  This file provides default scheduling policies that
 # can be directly used by TransferQueue data system. == ##
 
-def random_strategy(
-        ready_for_consume_idx: List[int], experience_count: int
-) -> Optional[List[int]]:
+
+def random_strategy(ready_for_consume_idx: list[int], experience_count: int) -> Optional[list[int]]:
     """
     random sampling from global indexes
     """
@@ -22,8 +22,11 @@ def random_strategy(
 
 
 def similar_seqlen_strategy(
-        ready_for_consume_idx: List[int], experience_count: int, seq_len: Tensor, target_seq_len=int
-) -> Optional[List[int]]:
+    ready_for_consume_idx: list[int],
+    experience_count: int,
+    seq_len: Tensor,
+    target_seq_len=int,
+) -> Optional[list[int]]:
     """
     get index whose seq_len is around certain specified target_seq_len
     need to pass seq_len, which is the corresponding Tensor of seq len for ready_for_consume_idx
@@ -42,8 +45,10 @@ def similar_seqlen_strategy(
 
 
 def dp_token_load_balancing_strategy(
-        ready_for_consume_idx: List[int], experience_count: int, seq_len_list: List[int],
-) -> Optional[List[int]]:
+    ready_for_consume_idx: list[int],
+    experience_count: int,
+    seq_len_list: list[int],
+) -> Optional[list[int]]:
     """
     get index using karmarkar_karp strategy across DP to make sure:
         1. each DP gets the same number of seqs and close total seq_len
@@ -53,21 +58,23 @@ def dp_token_load_balancing_strategy(
     assert len(ready_for_consume_idx) == len(seq_len_list)
 
     if len(ready_for_consume_idx) == experience_count:
-        sampled_indexes = [int(ready_for_consume_idx[i]) for i in range(experience_count)]
-        return sampled_indexes
+        return [int(ready_for_consume_idx[i]) for i in range(experience_count)]
 
     k_partitions = len(seq_len_list) // experience_count
     sampled_indexes_idx = get_seqlen_balanced_partitions(seq_len_list, k_partitions, equal_size=True)
     if len(sampled_indexes_idx) > 0:
-        sampled_indexes = [int(ready_for_consume_idx[i]) for i in sampled_indexes_idx[0]]
-    else:
-        sampled_indexes = None
-    return sampled_indexes
+        return [int(ready_for_consume_idx[i]) for i in sampled_indexes_idx[0]]
+
+    return None
 
 
 def storage_unit_load_balancing_strategy(
-        ready_for_consume_idx: List[int], experience_count: int, storage_node_num, *args, **kwargs
-) -> Optional[List[int]]:
+    ready_for_consume_idx: list[int],
+    experience_count: int,
+    storage_node_num,
+    *args,
+    **kwargs,
+) -> Optional[list[int]]:
     """
     sampling using round robin strategy across all storage nodes
     """
@@ -76,7 +83,8 @@ def storage_unit_load_balancing_strategy(
 
 ## ============ utils for samplers ============ ##
 
-def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+
+def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     """Karmarkar-Karp algorithm for partitioning a list of integers into k partitions
     such that the difference between the largest and smallest partition is minimized.
     Parameters:
@@ -113,7 +121,7 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
             return self.items < other.items
 
     class State:
-        def __init__(self, items: List[Tuple[int, int]], k: int) -> None:
+        def __init__(self, items: list[tuple[int, int]], k: int) -> None:
             self.k = k
             # sets should always be decreasing order
             self.sets = [Set() for _ in range(k)]
@@ -192,7 +200,7 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     return partitions
 
 
-def heapq_partition(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+def heapq_partition(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     equal_part_num = len(seqlen_list) // k_partitions
 
     sorted_seqlen = sorted([(seqlen, i) for i, seqlen in enumerate(seqlen_list)], reverse=True)
@@ -221,11 +229,12 @@ def heapq_partition(seqlen_list: List[int], k_partitions: int, equal_size: bool)
         for i, partition in enumerate(partitions):
             if len(partition) * k_partitions != len(seqlen_list):
                 raise ValueError(
-                    f"Partition {i} has {len(partition)} items, expected {len(seqlen_list) // k_partitions}")
+                    f"Partition {i} has {len(partition)} items, expected {len(seqlen_list) // k_partitions}"
+                )
     return partitions
 
 
-def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+def get_seqlen_balanced_partitions(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     """get order of seq lengths to make partitions balanced, this is
         used in balancing sum of seq length across dp ranks and micro batches
     Parameters:
@@ -257,7 +266,12 @@ def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, eq
     return _check_and_sort_partitions(partitions)
 
 
-def rearrange_micro_batches(seqlen_list: List[int], max_token_len: int, dynamic_max_batch_size=None, dp_group=None):
+def rearrange_micro_batches(
+    seqlen_list: list[int],
+    max_token_len: int,
+    dynamic_max_batch_size=None,
+    dp_group=None,
+):
     """get order of seq lengths to make partitions balanced, this is
         used in balancing sum of seq length across dp ranks and micro batches
     Parameters:
@@ -276,10 +290,13 @@ def rearrange_micro_batches(seqlen_list: List[int], max_token_len: int, dynamic_
     k_partitions = (total_sum_of_seqlen + max_token_len - 1) // max_token_len
 
     if dynamic_max_batch_size is not None:
-        k_partitions = max(k_partitions, (len(seqlen_list) + dynamic_max_batch_size - 1) // dynamic_max_batch_size)
+        k_partitions = max(
+            k_partitions,
+            (len(seqlen_list) + dynamic_max_batch_size - 1) // dynamic_max_batch_size,
+        )
 
     if dist.is_initialized():
-        k_partitions = torch.tensor([k_partitions], device='npu')
+        k_partitions = torch.tensor([k_partitions], device="npu")
         dist.all_reduce(k_partitions, op=dist.ReduceOp.MAX, group=dp_group)
         k_partitions = k_partitions.cpu().item()
 

@@ -24,7 +24,11 @@ import ray
 # from verl.utils.device import get_torch_device, get_visible_devices_keyword
 
 from .decorator import Dispatch, Execute, register
-from verl_use_case.utils.utils import get_visible_devices_keyword, get_torch_device, ray_noset_visible_devices
+from verl_use_case.utils.utils import (
+    get_visible_devices_keyword,
+    get_torch_device,
+    ray_noset_visible_devices,
+)
 
 
 @dataclass
@@ -87,12 +91,19 @@ class Worker(WorkerHelper):
         worker_group_prefix = os.environ.get("WG_PREFIX", None)
 
         # when decorator @ray.remote applies, __new__ will be called while we don't want to apply _configure_before_init
-        if None not in [rank, worker_group_prefix] and "ActorClass(" not in cls.__name__:
-            instance._configure_before_init(f"{worker_group_prefix}_register_center", int(rank))
+        if (
+            None not in [rank, worker_group_prefix]
+            and "ActorClass(" not in cls.__name__
+        ):
+            instance._configure_before_init(
+                f"{worker_group_prefix}_register_center", int(rank)
+            )
 
         return instance
 
-    def _register_dispatch_collect_info(self, mesh_name: str, dp_rank: int, is_collect: bool):
+    def _register_dispatch_collect_info(
+        self, mesh_name: str, dp_rank: int, is_collect: bool
+    ):
         """Register the dp_rank for a given mesh name. This function is meant to be called by the worker
 
         Args:
@@ -156,7 +167,9 @@ class Worker(WorkerHelper):
             }
 
             if os.getenv("WG_BACKEND", None) == "ray":
-                from verl_use_case.single_controller.base.register_center.ray import create_worker_group_register_center
+                from verl_use_case.single_controller.base.register_center.ray import (
+                    create_worker_group_register_center,
+                )
 
                 self.register_center = create_worker_group_register_center(
                     name=register_center_name, info=rank_zero_info
@@ -167,7 +180,11 @@ class Worker(WorkerHelper):
             self.register_center = ray.get_actor(register_center_name)
 
         # set worker info for node affinity scheduling
-        ray.get(self.register_center.set_worker_info.remote(rank, ray.get_runtime_context().get_node_id()))
+        ray.get(
+            self.register_center.set_worker_info.remote(
+                rank, ray.get_runtime_context().get_node_id()
+            )
+        )
 
     @classmethod
     def env_keys(cls):
@@ -266,7 +283,9 @@ class Worker(WorkerHelper):
             # Otherwise, we will set ROCR_VISIBLE_DEVICES to CUDA_VISIBLE_DEVICES
             # and remove ROCR_VISIBLE_DEVICES.
             if cuda_val:
-                raise ValueError("Please don't set ROCR_VISIBLE_DEVICES when HIP/CUDA_VISIBLE_DEVICES is set.")
+                raise ValueError(
+                    "Please don't set ROCR_VISIBLE_DEVICES when HIP/CUDA_VISIBLE_DEVICES is set."
+                )
 
             cuda_val = os.environ.pop("ROCR_VISIBLE_DEVICES")
             os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
@@ -285,7 +304,10 @@ class Worker(WorkerHelper):
         """
         This function should only be called inside by WorkerGroup
         """
-        store_env_dict = {f"_{key.lower()}": store.get(f"_{key.lower()}", None) for key in type(self).env_keys()}
+        store_env_dict = {
+            f"_{key.lower()}": store.get(f"_{key.lower()}", None)
+            for key in type(self).env_keys()
+        }
         self.__dict__.update(store_env_dict)  # this is hacky
         # print(f"__dict__: {self.__dict__}")
         for key in type(self).env_keys():
@@ -294,7 +316,9 @@ class Worker(WorkerHelper):
                 # print(f"set {key} to {val}")
                 os.environ[key] = str(val)
         os.environ["REDIS_STORE_SERVER_HOST"] = (
-            str(self._master_addr).replace("[", "").replace("]", "") if self._master_addr else ""
+            str(self._master_addr).replace("[", "").replace("]", "")
+            if self._master_addr
+            else ""
         )
 
     def get_master_addr_port(self):
@@ -305,7 +329,9 @@ class Worker(WorkerHelper):
         """Get the CUDA visible devices configuration."""
         import os
 
-        visible_devices = os.environ.get(get_visible_devices_keyword().upper(), "not set")
+        visible_devices = os.environ.get(
+            get_visible_devices_keyword().upper(), "not set"
+        )
         return visible_devices
 
     @property
