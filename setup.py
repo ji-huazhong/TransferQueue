@@ -10,6 +10,11 @@ with open(os.path.join(version_folder, "transfer_queue/version/version")) as f:
 
 install_requires = [
     "pyzmq",
+    "ray",
+    "torch",
+    "hydra-core",
+    "tensordict>=0.8.0,<=0.9.1,!=0.9.0",
+    "numpy<2.0.0",
 ]
 
 

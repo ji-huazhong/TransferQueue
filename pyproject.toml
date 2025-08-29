@@ -63,6 +63,8 @@ ignore = [
     "UP045",
     # deprecated import
     "UP035",
+    # non-pep604-annotation-union
+    "UP007",
 ]
 
 # -------------------------------
