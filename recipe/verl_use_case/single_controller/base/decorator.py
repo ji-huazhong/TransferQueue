@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import importlib
+import inspect
 from functools import partial, wraps
 from types import FunctionType
 from typing import Any, Iterator, Optional
@@ -168,11 +168,7 @@ def _split_args_kwargs_data_proto_with_auto_padding(chunks, *args, **kwargs):
             # for padding, we only support DataProto with same length
             if data_proto_len is None:
                 data_proto_len = len(obj)
-                padding_size = (
-                    (chunks - (data_proto_len % chunks))
-                    if (data_proto_len % chunks > 0)
-                    else 0
-                )
+                padding_size = (chunks - (data_proto_len % chunks)) if (data_proto_len % chunks > 0) else 0
             else:
                 assert data_proto_len == len(obj), (
                     f"expecting all arg share same length of {data_proto_len}, but got {len(obj)}"
@@ -181,9 +177,7 @@ def _split_args_kwargs_data_proto_with_auto_padding(chunks, *args, **kwargs):
         return obj.chunk(chunks=chunks)
 
     splitted_args = [_padding_and_split_data(arg, chunks) for arg in args]
-    splitted_kwargs = {
-        key: _padding_and_split_data(val, chunks) for key, val in kwargs.items()
-    }
+    splitted_kwargs = {key: _padding_and_split_data(val, chunks) for key, val in kwargs.items()}
     if padding_size is not None:
         splitted_kwargs[_padding_size_key] = padding_size
 
@@ -277,30 +271,23 @@ def dispatch_dp_compute_data_proto_with_func(worker_group, *args, **kwargs):
     assert isinstance(worker_group, WorkerGroup)
     assert isinstance(args[0], FunctionType)  # NOTE: The first one args is a function!
 
-    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(
-        worker_group.world_size, *args[1:], **kwargs
-    )
+    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(worker_group.world_size, *args[1:], **kwargs)
     splitted_args_with_func = [[args[0]] * worker_group.world_size] + splitted_args
     return splitted_args_with_func, splitted_kwargs
 
 
 def collect_dp_compute_data_proto(worker_group, output):
     import ray
-
     from verl.protocol import DataProto
 
     for o in output:
-        assert isinstance(o, DataProto | ray.ObjectRef), (
-            f"expecting {o} to be DataProto, but got {type(o)}"
-        )
+        assert isinstance(o, DataProto | ray.ObjectRef), f"expecting {o} to be DataProto, but got {type(o)}"
 
     output = collect_dp_compute(worker_group, output)
     return _concat_data_proto_or_future(output)
 
 
-def dispatch_nd_compute(
-    dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs
-):
+def dispatch_nd_compute(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
     import ray
 
     from verl_use_case.single_controller.base.worker_group import WorkerGroup
@@ -345,27 +332,18 @@ def collect_nd_compute(collect_mask: list[bool], worker_group, output):
     return output_in_dp
 
 
-def dispatch_nd_compute_dataproto(
-    dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs
-):
-    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(
-        dp_size, *args, **kwargs
-    )
-    return dispatch_nd_compute(
-        dp_rank_mapping, dp_size, worker_group, *splitted_args, **splitted_kwargs
-    )
+def dispatch_nd_compute_dataproto(dp_rank_mapping: list[int], dp_size, worker_group, *args, **kwargs):
+    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto(dp_size, *args, **kwargs)
+    return dispatch_nd_compute(dp_rank_mapping, dp_size, worker_group, *splitted_args, **splitted_kwargs)
 
 
 def collect_nd_compute_dataproto(collect_mask: list[bool], worker_group, output):
     output = collect_nd_compute(collect_mask, worker_group, output)
     import ray
-
     from verl.protocol import DataProto
 
     for o in output:
-        assert isinstance(o, DataProto | ray.ObjectRef), (
-            f"expecting {o} to be DataProto, but got {type(o)}"
-        )
+        assert isinstance(o, DataProto | ray.ObjectRef), f"expecting {o} to be DataProto, but got {type(o)}"
     return _concat_data_proto_or_future(output)
 
 
@@ -376,17 +354,13 @@ def dispatch_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
 
     # query dispatch info of the worker group
     if mesh_name not in worker_group._dispatch_info:
-        worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(
-            mesh_name
-        )
+        worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
         assert len(worker_group._dispatch_info[mesh_name]) == worker_group.world_size
 
     dp_rank_mapping = worker_group._dispatch_info[mesh_name]
     # perform dispatch
     dp_size = max(dp_rank_mapping) + 1
-    return dispatch_nd_compute_dataproto(
-        dp_rank_mapping, dp_size, worker_group, *args, **kwargs
-    )
+    return dispatch_nd_compute_dataproto(dp_rank_mapping, dp_size, worker_group, *args, **kwargs)
 
 
 def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
@@ -398,9 +372,7 @@ def collect_lazy_compute_data_proto(mesh_name, worker_group, *args, **kwargs):
     assert mesh_name in worker_group._dispatch_info
 
     if mesh_name not in worker_group._collect_info:
-        worker_group._collect_info[mesh_name] = worker_group._query_collect_info(
-            mesh_name
-        )
+        worker_group._collect_info[mesh_name] = worker_group._query_collect_info(mesh_name)
         assert len(worker_group._collect_info[mesh_name]) == worker_group.world_size
 
     # a boolean of whether the dp_rank is used for collect
@@ -463,9 +435,7 @@ def register_dispatch_mode(dispatch_mode_name, dispatch_fn, collect_fn):
     """
     dispatch_mode = Dispatch.register(dispatch_mode_name)
     _check_dispatch_mode(dispatch_mode)
-    assert dispatch_mode not in DISPATCH_MODE_FN_REGISTRY, (
-        f"dispatch_mode_name {dispatch_mode_name} already exists"
-    )
+    assert dispatch_mode not in DISPATCH_MODE_FN_REGISTRY, f"dispatch_mode_name {dispatch_mode_name} already exists"
     DISPATCH_MODE_FN_REGISTRY[dispatch_mode] = {
         "dispatch_fn": dispatch_fn,
         "collect_fn": collect_fn,
@@ -477,9 +447,7 @@ def update_dispatch_mode(dispatch_mode, dispatch_fn, collect_fn):
     Update the dispatch mode.
     """
     _check_dispatch_mode(dispatch_mode)
-    assert dispatch_mode in DISPATCH_MODE_FN_REGISTRY, (
-        f"dispatch_mode {dispatch_mode} not found"
-    )
+    assert dispatch_mode in DISPATCH_MODE_FN_REGISTRY, f"dispatch_mode {dispatch_mode} not found"
     DISPATCH_MODE_FN_REGISTRY[dispatch_mode] = {
         "dispatch_fn": dispatch_fn,
         "collect_fn": collect_fn,
@@ -505,15 +473,11 @@ def _check_dispatch_mode(dispatch_mode):
     if isinstance(dispatch_mode, dict):
         necessary_keys = ["dispatch_fn", "collect_fn"]
         for key in necessary_keys:
-            assert key in dispatch_mode, (
-                f"key {key} should be in dispatch_mode if it is a dictionary"
-            )
+            assert key in dispatch_mode, f"key {key} should be in dispatch_mode if it is a dictionary"
 
 
 def _check_execute_mode(execute_mode):
-    assert isinstance(execute_mode, Execute), (
-        f"execute_mode must be a Execute. Got {execute_mode}"
-    )
+    assert isinstance(execute_mode, Execute), f"execute_mode must be a Execute. Got {execute_mode}"
 
 
 def _materialize_futures(*args, **kwargs):

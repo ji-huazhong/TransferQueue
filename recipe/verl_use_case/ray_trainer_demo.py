@@ -1,7 +1,7 @@
 from queue import Queue
-from omegaconf import OmegaConf
 
-from single_controller.ray import RayWorkerGroup, RayClassWithInitArgs, RayResourcePool
+from omegaconf import OmegaConf
+from single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from single_controller.ray.base import create_colocated_worker_cls_fused
 from workers.megatron_worker_demo import ActorRolloutRefWorker
 
@@ -27,9 +27,7 @@ class SentenceIterator:
 
     def __next__(self):
         if self.start_index < self.count:
-            result = self.sentences[
-                self.start_index : self.start_index + self.batch_size
-            ]
+            result = self.sentences[self.start_index : self.start_index + self.batch_size]
             self.start_index += self.batch_size
             return result
         else:
@@ -64,9 +62,7 @@ class RayPPOTrainer:
         #################################################################################
         # Data System：提供iteration感知能力，记录当前actor训练的iteration
         #################################################################################
-        self.iteration_record_queue = Queue(
-            maxsize=self.config.algorithm.staleness_threshold
-        )
+        self.iteration_record_queue = Queue(maxsize=self.config.algorithm.staleness_threshold)
 
         self.train_dataloader = SentenceIterator(self.config.data.train_batch_size)
 
@@ -90,9 +86,7 @@ class RayPPOTrainer:
             # TransferQueueStorage通过Ray拉起，是一个ray.remote修饰的类
             storage_node = TransferQueueStorageSimpleUnit.remote(
                 storage_unit_id=storage_unit_rank,
-                storage_size=total_storage_size
-                // self.config.trainer.num_data_storage_units
-                + 1,
+                storage_size=total_storage_size // self.config.trainer.num_data_storage_units + 1,
             )
             self.data_system_storage_units[storage_unit_rank] = storage_node
 
@@ -100,26 +94,20 @@ class RayPPOTrainer:
         # 这里支持多controller实例以实现负载均衡，支持大规模扩展。不同controller可分配至不同RL计算任务
         self.data_system_controllers = {}
         for controller_rank in range(self.config.trainer.num_data_controllers):
-            self.data_system_controllers[controller_rank] = (
-                TransferQueueController.remote(
-                    controller_id=controller_rank,
-                    num_storage_units=self.config.trainer.num_data_storage_units,
-                    global_batch_size=self.config.data.train_batch_size,
-                    num_global_batch=self.config.algorithm.staleness_threshold,
-                    num_n_samples=self.config.actor_rollout_ref.rollout.n,
-                )
+            self.data_system_controllers[controller_rank] = TransferQueueController.remote(
+                controller_id=controller_rank,
+                num_storage_units=self.config.trainer.num_data_storage_units,
+                global_batch_size=self.config.data.train_batch_size,
+                num_global_batch=self.config.algorithm.staleness_threshold,
+                num_n_samples=self.config.actor_rollout_ref.rollout.n,
             )
 
         # 3. 将Controller注册至各个Storage
         # 每个Storage Unit拿到所有Controller的handler，通过Ray拿到对应的IP+端口，之后建立ZMQ Socket进行消息传输
         from utils.data_system import process_zmq_server_info
 
-        self.data_system_controller_infos = process_zmq_server_info(
-            self.data_system_controllers
-        )
-        self.data_system_storage_unit_infos = process_zmq_server_info(
-            self.data_system_storage_units
-        )
+        self.data_system_controller_infos = process_zmq_server_info(self.data_system_controllers)
+        self.data_system_storage_unit_infos = process_zmq_server_info(self.data_system_storage_units)
 
         # TODO: 待实现后打开注释
         # ray.get([storage_unit.register_controller_info.remote(self.data_system_controller_infos) for storage_unit in
@@ -157,21 +145,14 @@ class RayPPOTrainer:
         )
 
         # resource_pool = RayResourcePool(process_on_nodes=[2])
-        resource_pool = RayResourcePool(
-            process_on_nodes=[self.config.trainer.num_gpus_per_node]
-        )
+        resource_pool = RayResourcePool(process_on_nodes=[self.config.trainer.num_gpus_per_node])
         # create colocated workers
         cls_dict = {"actor_rollout": actor_rollout_ref_cls}
         ray_cls_with_init = create_colocated_worker_cls_fused(cls_dict)
 
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
-        if (
-            OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout")
-            is not None
-        ):
-            wg_kwargs["ray_wait_register_center_timeout"] = (
-                self.config.trainer.ray_wait_register_center_timeout
-            )
+        if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
+            wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
         wg_dict = RayWorkerGroup(
             resource_pool=resource_pool,

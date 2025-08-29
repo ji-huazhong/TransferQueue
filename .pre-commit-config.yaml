@@ -4,11 +4,11 @@ repos:
     hooks:
       - id: ruff
         args: ["--fix", "--show-fixes", "--output-format=full"]
-        exclude: ^.*\.(ipynb)$
+        exclude: ^(.*\.ipynb|recipe/verl_use_case/.*)$ # Remove this restriction, once verl_use_case is ready 
       - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: 'v1.17.0'
     hooks:
       - id: mypy
-        exclude: verl_use_case
+        exclude: recipe/verl_use_case # Remove this restriction, once verl_use_case is ready
