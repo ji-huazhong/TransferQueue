@@ -1,12 +1,11 @@
-import os
 import datetime
-from omegaconf import DictConfig
+import os
 
 import torch
-
+from omegaconf import DictConfig
 from verl_use_case.single_controller.base import Worker
 from verl_use_case.single_controller.base.decorator import Dispatch, register
-from verl_use_case.utils.utils import get_nccl_backend, get_device_id
+from verl_use_case.utils.utils import get_device_id, get_nccl_backend
 
 
 def compute_log_prob(data):
@@ -69,9 +68,7 @@ class ActorRolloutRefWorker(Worker):
             # rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(
                 backend=get_nccl_backend(),
-                timeout=datetime.timedelta(
-                    seconds=self.config.get("nccl_timeout", 600)
-                ),
+                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
             # 运行demo时需要注释

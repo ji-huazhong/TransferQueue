@@ -1,6 +1,5 @@
 import ray
 from omegaconf import OmegaConf
-
 from ray_trainer_demo import RayPPOTrainer
 
 

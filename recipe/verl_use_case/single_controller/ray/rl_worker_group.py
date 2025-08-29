@@ -1,7 +1,7 @@
+import pprint
 from threading import Thread
 
 import ray
-import pprint
 from tqdm import tqdm
 from verl.single_controller.ray.base import RayWorkerGroup
 
@@ -78,7 +78,6 @@ class ActorWorkerGroup(RayWorkerGroup):
         # Data System：在这里，提供一个子主控模块，基本完全仿照之前ray_trainer中的主控进行编写，只不过只维护自己的任务
         ######################################################################################################
         from omegaconf import OmegaConf
-
         from verl.utils.tracking import Tracking
 
         logger = Tracking(
@@ -98,9 +97,7 @@ class ActorWorkerGroup(RayWorkerGroup):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get(
-            "val_before_train", True
-        ):
+        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
@@ -121,21 +118,19 @@ class ActorWorkerGroup(RayWorkerGroup):
                     ##########################################################################################
                     # Data System：在主控中根据算法要求，为每一个任务取出对应的MetaData，并基于现有Dispatch功能分发
                     ##########################################################################################
-                    log_prob_data_meta, current_global_step = (
-                        self.data_system_client.get_meta(
-                            data_columns=[
-                                "prompt_token_ids",
-                                "attention_mask",
-                                "position_ids",
-                            ],
-                            experience_count=self.config.data.actor_compute_log_prob_dispatch_size,  # 每路DP的样本条数; 在分离场景为mbs,
-                            dp_world_size=self.config.actor.rollout.dp_world_size,  # DP总数
-                            num_dp_groups=None,  # 通过主控分发，无需声明DP域大小
-                            dp_rank=None,  # 通过主控分发，无需指定自身的DP rank
-                            rank_id=None,
-                            get_n_samples=False,
-                            schedule_policy="DP_balance",
-                        )
+                    log_prob_data_meta, current_global_step = self.data_system_client.get_meta(
+                        data_columns=[
+                            "prompt_token_ids",
+                            "attention_mask",
+                            "position_ids",
+                        ],
+                        experience_count=self.config.data.actor_compute_log_prob_dispatch_size,  # 每路DP的样本条数; 在分离场景为mbs,
+                        dp_world_size=self.config.actor.rollout.dp_world_size,  # DP总数
+                        num_dp_groups=None,  # 通过主控分发，无需声明DP域大小
+                        dp_rank=None,  # 通过主控分发，无需指定自身的DP rank
+                        rank_id=None,
+                        get_n_samples=False,
+                        schedule_policy="DP_balance",
                     )
                     self.actor_rollout_wg.compute_log_prob(log_prob_data_meta)
 

@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 
 import torch
 
@@ -23,9 +23,7 @@ def get_torch_device() -> any:
     try:
         return getattr(torch, device_name)
     except AttributeError:
-        logging.warning(
-            f"Device namespace '{device_name}' not found in torch, try to load torch.cuda."
-        )
+        logging.warning(f"Device namespace '{device_name}' not found in torch, try to load torch.cuda.")
         return torch.cuda
 
 
@@ -66,9 +64,7 @@ def get_nccl_backend() -> str:
     elif is_npu_available:
         return "hccl"
     else:
-        raise RuntimeError(
-            f"No available nccl backend found on device type {get_device_name()}."
-        )
+        raise RuntimeError(f"No available nccl backend found on device type {get_device_name()}.")
 
 
 def get_visible_devices_keyword() -> str:
@@ -76,11 +72,7 @@ def get_visible_devices_keyword() -> str:
     Returns:
         'CUDA_VISIBLE_DEVICES' or `ASCEND_RT_VISIBLE_DEVICES`
     """
-    return (
-        "CUDA_VISIBLE_DEVICES"
-        if torch.cuda.is_available()
-        else "ASCEND_RT_VISIBLE_DEVICES"
-    )
+    return "CUDA_VISIBLE_DEVICES" if torch.cuda.is_available() else "ASCEND_RT_VISIBLE_DEVICES"
 
 
 def ray_noset_visible_devices(env_vars=os.environ):
