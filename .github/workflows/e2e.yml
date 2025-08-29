@@ -28,12 +28,13 @@ permissions:
 
 jobs:
   e2e:
-    needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # Increase this timeout value as needed
+    timeout-minutes: 5 # Increase this timeout value as needed
+    env:
+      RAY_DEDUP_LOGS: "0"
     strategy:
       matrix:
-        python-verison: ["3.10"]
+        python-version: ["3.10"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python ${{ matrix.python-version }}
@@ -49,4 +50,4 @@ jobs:
       - name: Running simple use case E2E tests
         run: |
           ray stop --force
-          python3 recipe/simple_use_case/start_transferqueue.py
+          python recipe/simple_use_case/start_transferqueue.py

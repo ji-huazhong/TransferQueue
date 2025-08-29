@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def initialize_data_system(config):
     # 1. 初始化TransferQueueStorage
     total_storage_size = config.global_batch_size * config.num_global_batch
     data_system_storage_units = {}
+    logger.info(f">>>>cpu count={os.cpu_count()}")
     for storage_unit_rank in range(config.num_data_storage_units):
         # TransferQueueStorage通过Ray拉起，是一个ray.remote修饰的类
         storage_node = TransferQueueStorageSimpleUnit.remote(
@@ -60,6 +62,7 @@ def initialize_data_system(config):
             for storage_unit in data_system_storage_units.values()
         ]
     )
+    logger.info("All storage units have registered controller info.")
 
     # 4. 创建Client
     from transfer_queue.data_system import TransferQueueClient
@@ -149,3 +152,5 @@ if __name__ == "__main__":
     dict_conf = OmegaConf.create(config_str)
 
     main(dict_conf)
+
+    print("done")
