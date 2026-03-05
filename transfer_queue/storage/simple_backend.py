@@ -26,13 +26,20 @@ from uuid import uuid4
 
 import ray
 import zmq
-from ray.util import get_node_ip_address
 
 from transfer_queue.metadata import SampleMeta
 from transfer_queue.utils.common import limit_pytorch_auto_parallel_threads
 from transfer_queue.utils.enum_utils import TransferQueueRole
 from transfer_queue.utils.perf_utils import IntervalPerfMonitor
-from transfer_queue.utils.zmq_utils import ZMQMessage, ZMQRequestType, ZMQServerInfo, create_zmq_socket, get_free_port
+from transfer_queue.utils.zmq_utils import (
+    ZMQMessage,
+    ZMQRequestType,
+    ZMQServerInfo,
+    create_zmq_socket,
+    format_zmq_address,
+    get_free_port,
+    get_node_ip_address_raw,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("TQ_LOGGING_LEVEL", logging.WARNING))
@@ -208,22 +215,22 @@ class SimpleStorageUnit:
         - worker_socket (DEALER): Backend socket for worker communication.
         """
         self.zmq_context = zmq.Context()
+        self._node_ip = get_node_ip_address_raw()
 
         # Frontend: ROUTER for receiving client requests
-        self.put_get_socket = create_zmq_socket(self.zmq_context, zmq.ROUTER)
-        self._node_ip = get_node_ip_address()
+        self.put_get_socket = create_zmq_socket(self.zmq_context, zmq.ROUTER, self._node_ip)
 
         while True:
             try:
-                self._put_get_socket_port = get_free_port()
-                self.put_get_socket.bind(f"tcp://{self._node_ip}:{self._put_get_socket_port}")
+                self._put_get_socket_port = get_free_port(ip=self._node_ip)
+                self.put_get_socket.bind(format_zmq_address(self._node_ip, self._put_get_socket_port))
                 break
             except zmq.ZMQError:
                 logger.warning(f"[{self.storage_unit_id}]: Try to bind ZMQ sockets failed, retrying...")
                 continue
 
         # Backend: DEALER for worker communication (connected via zmq.proxy)
-        self.worker_socket = create_zmq_socket(self.zmq_context, zmq.DEALER)
+        self.worker_socket = create_zmq_socket(self.zmq_context, zmq.DEALER, self._node_ip)
         self.worker_socket.bind(self._inproc_addr)
 
         self.zmq_server_info = ZMQServerInfo(
@@ -269,8 +276,8 @@ class SimpleStorageUnit:
 
     def _worker_routine(self) -> None:
         """Worker thread for processing requests."""
-        # Each worker must have its own socket
-        worker_socket = create_zmq_socket(self.zmq_context, zmq.DEALER)
+
+        worker_socket = create_zmq_socket(self.zmq_context, zmq.DEALER, self._node_ip)
         worker_socket.connect(self._inproc_addr)
 
         poller = zmq.Poller()
@@ -306,18 +313,18 @@ class SimpleStorageUnit:
                     logger.debug(f"[{self.storage_unit_id}]: worker received operation: {operation}")
 
                     # Process request
-                    if operation == ZMQRequestType.PUT_DATA:
+                    if operation == ZMQRequestType.PUT_DATA:  # type: ignore[arg-type]
                         with perf_monitor.measure(op_type="PUT_DATA"):
                             response_msg = self._handle_put(request_msg)
-                    elif operation == ZMQRequestType.GET_DATA:
+                    elif operation == ZMQRequestType.GET_DATA:  # type: ignore[arg-type]
                         with perf_monitor.measure(op_type="GET_DATA"):
                             response_msg = self._handle_get(request_msg)
-                    elif operation == ZMQRequestType.CLEAR_DATA:
+                    elif operation == ZMQRequestType.CLEAR_DATA:  # type: ignore[arg-type]
                         with perf_monitor.measure(op_type="CLEAR_DATA"):
                             response_msg = self._handle_clear(request_msg)
                     else:
                         response_msg = ZMQMessage.create(
-                            request_type=ZMQRequestType.PUT_GET_OPERATION_ERROR,
+                            request_type=ZMQRequestType.PUT_GET_OPERATION_ERROR,  # type: ignore[arg-type]
                             sender_id=self.storage_unit_id,
                             body={
                                 "message": f"Storage unit id #{self.storage_unit_id} "
@@ -326,7 +333,7 @@ class SimpleStorageUnit:
                         )
                 except Exception as e:
                     response_msg = ZMQMessage.create(
-                        request_type=ZMQRequestType.PUT_GET_ERROR,
+                        request_type=ZMQRequestType.PUT_GET_ERROR,  # type: ignore[arg-type]
                         sender_id=self.storage_unit_id,
                         body={
                             "message": f"{self.storage_unit_id}, worker encountered error "
@@ -361,13 +368,15 @@ class SimpleStorageUnit:
 
             # After put operation finish, send a message to the client
             response_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.PUT_DATA_RESPONSE, sender_id=self.storage_unit_id, body={}
+                request_type=ZMQRequestType.PUT_DATA_RESPONSE,  # type: ignore[arg-type]
+                sender_id=self.storage_unit_id,
+                body={},  # type: ignore[arg-type]
             )
 
             return response_msg
         except Exception as e:
             return ZMQMessage.create(
-                request_type=ZMQRequestType.PUT_ERROR,
+                request_type=ZMQRequestType.PUT_ERROR,  # type: ignore[arg-type]
                 sender_id=self.storage_unit_id,
                 body={
                     "message": f"Failed to put data into storage unit id "
@@ -395,7 +404,7 @@ class SimpleStorageUnit:
                 result_data = self.storage_data.get_data(fields, local_indexes)
 
             response_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.GET_DATA_RESPONSE,
+                request_type=ZMQRequestType.GET_DATA_RESPONSE,  # type: ignore[arg-type]
                 sender_id=self.storage_unit_id,
                 body={
                     "data": result_data,
@@ -403,7 +412,7 @@ class SimpleStorageUnit:
             )
         except Exception as e:
             response_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.GET_ERROR,
+                request_type=ZMQRequestType.GET_ERROR,  # type: ignore[arg-type]
                 sender_id=self.storage_unit_id,
                 body={
                     "message": f"Failed to get data from storage unit id #{self.storage_unit_id}, "
@@ -431,13 +440,13 @@ class SimpleStorageUnit:
                 self.storage_data.clear(local_indexes)
 
             response_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.CLEAR_DATA_RESPONSE,
+                request_type=ZMQRequestType.CLEAR_DATA_RESPONSE,  # type: ignore[arg-type]
                 sender_id=self.storage_unit_id,
                 body={"message": f"Clear data in storage unit id #{self.storage_unit_id} successfully."},
             )
         except Exception as e:
             response_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.CLEAR_DATA_ERROR,
+                request_type=ZMQRequestType.CLEAR_DATA_ERROR,  # type: ignore[arg-type]
                 sender_id=self.storage_unit_id,
                 body={
                     "message": f"Failed to clear data in storage unit id #{self.storage_unit_id}, "
