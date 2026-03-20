@@ -566,13 +566,20 @@ class KVStorageManager(TransferQueueStorageManager):
         Store tensor data in the backend storage and notify the controller.
         """
         num_samples = len(metadata.global_indexes)
-        if num_samples == 0:
+        if data.batch_size[0] != num_samples:
+            raise ValueError(f"Batch size of data ({data.batch_size[0]}) does not match expected ({num_samples})")
+
+        if data.batch_size[0] == 0:
+            logger.warning("Attempted to put data with batch size 0. Operation will be skipped.")
             return
 
-        keys = self._generate_keys(data.keys(), metadata.global_indexes)
+        # Generate keys and values.
+        # metadata.field_names is legacy; generate keys/values from the actual data field names instead.
+        data_field_names = list(sorted(data.keys()))
+        keys = self._generate_keys(data_field_names, metadata.global_indexes)
         values = self._generate_values(data)
-        loop = asyncio.get_event_loop()
 
+        loop = asyncio.get_event_loop()
         custom_backend_meta = await loop.run_in_executor(None, self.storage_client.put, keys, values)
 
         field_schema = extract_field_schema(data)
@@ -588,15 +595,14 @@ class KVStorageManager(TransferQueueStorageManager):
             for global_idx in metadata.global_indexes:
                 per_field_custom_backend_meta[global_idx] = {}
 
-            # FIXME(tianyi): the order of custom backend meta is coupled with keys/values
-            # FIXME: if put_data is called to partially update/add new fields, the current
-            #       implementation will cause custom_backend_meta losses or mismatch!
             for (field_name, global_idx), meta_value in zip(
-                itertools.product(sorted(metadata.field_names), metadata.global_indexes),
+                itertools.product(data_field_names, metadata.global_indexes),
                 custom_backend_meta,
                 strict=True,
             ):
                 per_field_custom_backend_meta[global_idx][field_name] = meta_value
+                # TODO: There should not visit private property of metadata,
+                #       we should consider to add a public method in BatchMeta to set custom_backend_meta in the future.
                 metadata._custom_backend_meta[global_index_to_position[global_idx]][field_name] = meta_value
 
         # Get current data partition id
