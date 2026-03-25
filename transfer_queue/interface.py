@@ -30,6 +30,7 @@ from tensordict.tensorclass import NonTensorStack
 
 from transfer_queue.client import TransferQueueClient
 from transfer_queue.controller import TransferQueueController
+from transfer_queue.metadata import KVBatchMeta
 from transfer_queue.sampler import *  # noqa: F401
 from transfer_queue.sampler import BaseSampler
 from transfer_queue.storage.simple_backend import SimpleStorageUnit
@@ -359,7 +360,7 @@ def kv_put(
     partition_id: str,
     fields: Optional[TensorDict | dict[str, Any]] = None,
     tag: Optional[dict[str, Any]] = None,
-) -> None:
+) -> KVBatchMeta:
     """Put a single key-value pair to TransferQueue.
 
     This is a convenience method for putting data using a user-specified key
@@ -372,7 +373,13 @@ def kv_put(
         fields: Data fields to store. Can be a TensorDict or a dict of tensors.
                 Each key in `fields` will be treated as a column for the data sample.
                 If dict is provided, tensors will be unsqueezed to add batch dimension.
+                If not provided, will only update the newly given tag to the key.
         tag: Optional metadata tag to associate with the key
+
+    Returns:
+        KVBatchMeta: Metadata containing the key, tags, partition_id, and fields.
+                     The `fields` attribute includes all fields stored for this sample,
+                     including any new fields written by this put operation.
 
     Raises:
         ValueError: If neither fields nor tag is provided
@@ -384,12 +391,13 @@ def kv_put(
         >>> import torch
         >>> tq.init()
         >>> # Put with both fields and tag
-        >>> tq.kv_put(
+        >>> meta = tq.kv_put(
         ...     key="sample_1",
         ...     partition_id="train",
         ...     fields={"input_ids": torch.tensor([1, 2, 3])},
         ...     tag={"score": 0.95}
         ... )
+        >>> print(meta.fields)  # ['input_ids']
     """
     if fields is None and tag is None:
         raise ValueError("Please provide at least one parameter of `fields` or `tag`.")
@@ -420,18 +428,28 @@ def kv_put(
                     batch[field_name] = NonTensorStack(value)
             fields = TensorDict(batch, batch_size=[1])
         elif not isinstance(fields, TensorDict):
-            raise ValueError("field can only be dict or TensorDict")
+            raise ValueError("`fields` can only be dict or TensorDict")
 
-        # custom_meta (tag) will be put to controller through the internal put process
-        tq_client.put(fields, batch_meta)
+        # After put, batch_meta.field_names will include the new fields written by user
+        batch_meta = tq_client.put(fields, batch_meta)
     else:
-        # directly update custom_meta (tag) to controller
+        # Directly update custom_meta (tag) to controller
         tq_client.set_custom_meta(batch_meta)
+
+    fields_to_return = batch_meta.field_names
+
+    return KVBatchMeta(
+        keys=[key],
+        tags=batch_meta.custom_meta,
+        partition_id=partition_id,
+        fields=fields_to_return,
+        extra_info=batch_meta.extra_info,
+    )
 
 
 def kv_batch_put(
     keys: list[str], partition_id: str, fields: Optional[TensorDict] = None, tags: Optional[list[dict[str, Any]]] = None
-) -> None:
+) -> KVBatchMeta:
     """Put multiple key-value pairs to TransferQueue in batch.
 
     This method stores multiple key-value pairs in a single operation, which is more
@@ -440,8 +458,14 @@ def kv_batch_put(
     Args:
         keys: List of user-specified keys for the data
         partition_id: Logical partition to store the data in
-        fields: TensorDict containing data for all keys. Must have batch_size == len(keys)
+        fields: TensorDict containing data for all keys. Must have batch_size == len(keys).
+                If not provided, will only update the newly given tags to the keys.
         tags: List of metadata tags, one for each key
+
+    Returns:
+        KVBatchMeta: Metadata containing the keys, tags, partition_id, and fields.
+                     The `fields` attribute includes all fields stored for these samples,
+                     including any new fields written by this put operation.
 
     Raises:
         ValueError: If neither `fields` nor `tags` is provided
@@ -458,7 +482,8 @@ def kv_batch_put(
         ...     "attention_mask": torch.ones(3, 10),
         ... }, batch_size=3)
         >>> tags = [{"score": 0.9}, {"score": 0.85}, {"score": 0.95}]
-        >>> tq.kv_batch_put(keys=keys, partition_id="train", fields=fields, tags=tags)
+        >>> meta = tq.kv_batch_put(keys=keys, partition_id="train", fields=fields, tags=tags)
+        >>> print(meta.fields)  # ['input_ids', 'attention_mask']
     """
 
     if fields is None and tags is None:
@@ -481,20 +506,88 @@ def kv_batch_put(
         )
 
     # 2. register the user-specified tags to BatchMeta
-    if tags:
+    if tags is not None:
         if len(tags) != len(keys):
             raise ValueError(f"keys with length {len(keys)} does not match length of tags {len(tags)}")
         batch_meta.update_custom_meta(tags)
 
     # 3. put data
     if fields is not None:
-        tq_client.put(fields, batch_meta)
+        # After put, batch_meta.field_names will include the new fields written by user
+        batch_meta = tq_client.put(fields, batch_meta)
     else:
-        # directly update custom_meta (tags) to controller
+        # Directly update custom_meta (tags) to controller
         tq_client.set_custom_meta(batch_meta)
 
+    fields_to_return = batch_meta.field_names
 
-def kv_batch_get(keys: list[str] | str, partition_id: str, fields: Optional[list[str] | str] = None) -> TensorDict:
+    return KVBatchMeta(
+        keys=keys,
+        tags=batch_meta.custom_meta,
+        partition_id=partition_id,
+        fields=fields_to_return,
+        extra_info=batch_meta.extra_info,
+    )
+
+
+def kv_batch_get_by_meta(meta: KVBatchMeta, select_fields: Optional[list[str] | str] = None) -> TensorDict:
+    """Get data from TransferQueue using KVBatchMeta.
+
+    This is a convenience method for retrieving data using KVBatchMeta returned
+    from a previous put operation. It extracts the keys and partition_id from
+    the metadata to fetch the corresponding data.
+
+    Args:
+        meta: KVBatchMeta object returned from a previous put operation (e.g., kv_put,
+              kv_batch_put). It contains keys, partition_id, and fields information.
+        select_fields: Optional field(s) to retrieve, which overrides the fields
+                       recorded in the given KVBatchMeta. If None, uses all fields
+                       from meta.fields. Can be a single field name (str) or a list
+                       of field names.
+
+    Returns:
+        TensorDict with the requested data
+
+    Raises:
+        ValueError: If keys or partition are not found
+        ValueError: If empty fields exist in any key (sample)
+        ValueError: If any field in select_fields doesn't exist in KVBatchMeta.fields
+
+    Example:
+        >>> import transfer_queue as tq
+        >>> tq.init()
+        >>> # First put some data
+        >>> keys = ["sample_1", "sample_2", "sample_3"]
+        >>> fields = TensorDict({
+        ...     "input_ids": torch.randn(3, 10),
+        ...     "attention_mask": torch.ones(3, 10),
+        ... }, batch_size=3)
+        >>> meta = tq.kv_batch_put(keys=keys, partition_id="train", fields=fields)
+        >>> # Then retrieve it using the returned metadata
+        >>> data = tq.kv_batch_get_by_meta(meta)
+    """
+    if meta.partition_id is None:
+        raise ValueError("Must provide partition_id in the input KVBatchMeta.")
+    if select_fields is not None:
+        if isinstance(select_fields, str):
+            fields_to_fetch: Optional[list[str]] = [select_fields]
+        else:
+            fields_to_fetch = select_fields
+
+        assert fields_to_fetch is not None
+        if meta.fields is None or any(f not in meta.fields for f in fields_to_fetch):
+            raise ValueError(
+                f"Some fields assigned in select_fields not found in the metadata. "
+                f"Assigned: {fields_to_fetch}; Fields in KVBatchMeta: {meta.fields}."
+            )
+    else:
+        fields_to_fetch = meta.fields
+    return kv_batch_get(keys=meta.keys, partition_id=meta.partition_id, select_fields=fields_to_fetch)
+
+
+def kv_batch_get(
+    keys: list[str] | str, partition_id: str, select_fields: Optional[list[str] | str] = None
+) -> TensorDict:
     """Get data from TransferQueue using user-specified keys.
 
     This is a convenience method for retrieving data using keys instead of indexes.
@@ -502,14 +595,14 @@ def kv_batch_get(keys: list[str] | str, partition_id: str, fields: Optional[list
     Args:
         keys: Single key or list of keys to retrieve
         partition_id: Partition containing the keys
-        fields: Optional field(s) to retrieve. If None, retrieves all fields
+        select_fields: Optional field(s) to retrieve. If None, retrieves all fields
 
     Returns:
         TensorDict with the requested data
 
     Raises:
-        RuntimeError: If keys or partition are not found
-        RuntimeError: If empty fields exist in any key (sample)
+        ValueError: If keys or partition are not found
+        ValueError: If empty fields exist in any key (sample)
 
     Example:
         >>> import transfer_queue as tq
@@ -520,7 +613,7 @@ def kv_batch_get(keys: list[str] | str, partition_id: str, fields: Optional[list
         >>> data = tq.kv_batch_get(
         ...     keys=["sample_1", "sample_2"],
         ...     partition_id="train",
-        ...     fields="input_ids"
+        ...     select_fields="input_ids"
         ... )
     """
     tq_client = _maybe_create_transferqueue_client()
@@ -528,15 +621,18 @@ def kv_batch_get(keys: list[str] | str, partition_id: str, fields: Optional[list
     batch_meta = tq_client.kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
 
     if batch_meta.size == 0:
-        raise RuntimeError("keys or partition were not found!")
+        raise ValueError("keys or partition were not found!")
 
-    if fields is not None:
-        if isinstance(fields, str):
-            fields = [fields]
-        batch_meta = batch_meta.select_fields(fields)
+    fields_to_fetch: list[str] | None
+    if select_fields is not None:
+        if isinstance(select_fields, str):
+            fields_to_fetch = [select_fields]
+        else:
+            fields_to_fetch = select_fields
+        batch_meta = batch_meta.select_fields(fields_to_fetch)
 
     if not batch_meta.is_ready:
-        raise RuntimeError("Some fields are not ready in all the requested keys!")
+        raise ValueError("Some fields are not ready in all the requested keys!")
 
     data = tq_client.get_data(batch_meta)
     return data
@@ -618,7 +714,7 @@ async def async_kv_put(
     partition_id: str,
     fields: Optional[TensorDict | dict[str, Any]] = None,
     tag: Optional[dict[str, Any]] = None,
-) -> None:
+) -> KVBatchMeta:
     """Asynchronously put a single key-value pair to TransferQueue.
 
     This is a convenience method for putting data using a user-specified key
@@ -631,7 +727,13 @@ async def async_kv_put(
         fields: Data fields to store. Can be a TensorDict or a dict of tensors.
                 Each key in `fields` will be treated as a column for the data sample.
                 If dict is provided, tensors will be unsqueezed to add batch dimension.
+                If not provided, will only update the newly given tag to the key.
         tag: Optional metadata tag to associate with the key
+
+    Returns:
+        KVBatchMeta: Metadata containing the key, tags, partition_id, and fields.
+                     The `fields` attribute includes all fields stored for this sample,
+                     including any new fields written by this put operation.
 
     Raises:
         ValueError: If neither fields nor tag is provided
@@ -643,12 +745,13 @@ async def async_kv_put(
         >>> import torch
         >>> tq.init()
         >>> # Put with both fields and tag
-        >>> await tq.async_kv_put(
+        >>> meta = await tq.async_kv_put(
         ...     key="sample_1",
         ...     partition_id="train",
         ...     fields={"input_ids": torch.tensor([1, 2, 3])},
         ...     tag={"score": 0.95}
-        ... ))
+        ... )
+        >>> print(meta.fields)  # ['input_ids']
     """
 
     if fields is None and tag is None:
@@ -663,7 +766,7 @@ async def async_kv_put(
         raise RuntimeError(f"Retrieved BatchMeta size {batch_meta.size} does not match with input `key` size of 1!")
 
     # 2. register the user-specified tag to BatchMeta
-    if tag:
+    if tag is not None:
         batch_meta.update_custom_meta([tag])
 
     # 3. put data
@@ -680,18 +783,28 @@ async def async_kv_put(
                     batch[field_name] = NonTensorStack(value)
             fields = TensorDict(batch, batch_size=[1])
         elif not isinstance(fields, TensorDict):
-            raise ValueError("field can only be dict or TensorDict")
+            raise ValueError("`fields` can only be dict or TensorDict")
 
-        # custom_meta (tag) will be put to controller through the put process
-        await tq_client.async_put(fields, batch_meta)
+        # After put, batch_meta.field_names will include the new fields written by user
+        batch_meta = await tq_client.async_put(fields, batch_meta)
     else:
-        # directly update custom_meta (tag) to controller
+        # Directly update custom_meta (tag) to controller
         await tq_client.async_set_custom_meta(batch_meta)
+
+    fields_to_return = batch_meta.field_names
+
+    return KVBatchMeta(
+        keys=[key],
+        tags=batch_meta.custom_meta,
+        partition_id=partition_id,
+        fields=fields_to_return,
+        extra_info=batch_meta.extra_info,
+    )
 
 
 async def async_kv_batch_put(
     keys: list[str], partition_id: str, fields: Optional[TensorDict] = None, tags: Optional[list[dict[str, Any]]] = None
-) -> None:
+) -> KVBatchMeta:
     """Asynchronously put multiple key-value pairs to TransferQueue in batch.
 
     This method stores multiple key-value pairs in a single operation, which is more
@@ -700,8 +813,14 @@ async def async_kv_batch_put(
     Args:
         keys: List of user-specified keys for the data
         partition_id: Logical partition to store the data in
-        fields: TensorDict containing data for all keys. Must have batch_size == len(keys)
+        fields: TensorDict containing data for all keys. Must have batch_size == len(keys).
+                If not provided, will only update the newly given tags to the keys.
         tags: List of metadata tags, one for each key
+
+    Returns:
+        KVBatchMeta: Metadata containing the keys, tags, partition_id, and fields.
+                     The `fields` attribute includes all fields stored for these samples,
+                     including any new fields written by this put operation.
 
     Raises:
         ValueError: If neither `fields` nor `tags` is provided
@@ -717,7 +836,8 @@ async def async_kv_batch_put(
         ...     "attention_mask": torch.ones(3, 10),
         ... }, batch_size=3)
         >>> tags = [{"score": 0.9}, {"score": 0.85}, {"score": 0.95}]
-        >>> await tq.async_kv_batch_put(keys=keys, partition_id="train", fields=fields, tags=tags)
+        >>> meta = await tq.async_kv_batch_put(keys=keys, partition_id="train", fields=fields, tags=tags)
+        >>> print(meta.fields)  # ['input_ids', 'attention_mask']
     """
 
     if fields is None and tags is None:
@@ -747,14 +867,82 @@ async def async_kv_batch_put(
 
     # 3. put data
     if fields is not None:
-        await tq_client.async_put(fields, batch_meta)
+        # After put, batch_meta.field_names will include the new fields written by user
+        batch_meta = await tq_client.async_put(fields, batch_meta)
     else:
-        # directly update custom_meta (tags) to controller
+        # Directly update custom_meta (tags) to controller
         await tq_client.async_set_custom_meta(batch_meta)
+
+    fields_to_return = batch_meta.field_names
+
+    return KVBatchMeta(
+        keys=keys,
+        tags=batch_meta.custom_meta,
+        partition_id=partition_id,
+        fields=fields_to_return,
+        extra_info=batch_meta.extra_info,
+    )
+
+
+async def async_kv_batch_get_by_meta(meta: KVBatchMeta, select_fields: Optional[list[str] | str] = None) -> TensorDict:
+    """Asynchronously get data from TransferQueue using KVBatchMeta.
+
+    This is a convenience method for retrieving data using KVBatchMeta returned
+    from a previous put operation. It extracts the keys and partition_id from
+    the metadata to fetch the corresponding data.
+
+    Args:
+        meta: KVBatchMeta object returned from a previous put operation (e.g., async_kv_put,
+              async_kv_batch_put). It contains keys, partition_id, and fields information.
+        select_fields: Optional field(s) to retrieve, which overrides the fields
+                       recorded in the given KVBatchMeta. If None, uses all fields
+                       from meta.fields. Can be a single field name (str) or a list
+                       of field names.
+
+    Returns:
+        TensorDict with the requested data
+
+    Raises:
+        ValueError: If keys or partition are not found
+        ValueError: If empty fields exist in any key (sample)
+        ValueError: If any field in select_fields doesn't exist in KVBatchMeta.fields
+
+    Example:
+        >>> import transfer_queue as tq
+        >>> tq.init()
+        >>> # First put some data
+        >>> keys = ["sample_1", "sample_2", "sample_3"]
+        >>> fields = TensorDict({
+        ...     "input_ids": torch.randn(3, 10),
+        ...     "attention_mask": torch.ones(3, 10),
+        ... }, batch_size=3)
+        >>> meta = await tq.async_kv_batch_put(keys=keys, partition_id="train", fields=fields)
+        >>> # Then retrieve it using the returned metadata
+        >>> data = await tq.async_kv_batch_get_by_meta(meta)
+    """
+    if meta.partition_id is None:
+        raise ValueError("Must provide partition_id in the input KVBatchMeta.")
+
+    fields_to_fetch: list[str] | None
+    if select_fields is not None:
+        if isinstance(select_fields, str):
+            fields_to_fetch = [select_fields]
+        else:
+            fields_to_fetch = select_fields
+
+        assert fields_to_fetch is not None
+        if meta.fields is None or any(f not in meta.fields for f in fields_to_fetch):
+            raise ValueError(
+                f"Some fields assigned in select_fields not found in the metadata. "
+                f"Assigned: {fields_to_fetch}; Fields in KVBatchMeta: {meta.fields}."
+            )
+    else:
+        fields_to_fetch = meta.fields
+    return await async_kv_batch_get(keys=meta.keys, partition_id=meta.partition_id, select_fields=fields_to_fetch)
 
 
 async def async_kv_batch_get(
-    keys: list[str] | str, partition_id: str, fields: Optional[list[str] | str] = None
+    keys: list[str] | str, partition_id: str, select_fields: Optional[list[str] | str] = None
 ) -> TensorDict:
     """Asynchronously get data from TransferQueue using user-specified keys.
 
@@ -763,14 +951,14 @@ async def async_kv_batch_get(
     Args:
         keys: Single key or list of keys to retrieve
         partition_id: Partition containing the keys
-        fields: Optional field(s) to retrieve. If None, retrieves all fields
+        select_fields: Optional field(s) to retrieve. If None, retrieves all fields
 
     Returns:
         TensorDict with the requested data
 
     Raises:
-        RuntimeError: If keys or partition are not found
-        RuntimeError: If empty fields exist in any key (sample)
+        ValueError: If keys or partition are not found
+        ValueError: If empty fields exist in any key (sample)
 
     Example:
         >>> import transfer_queue as tq
@@ -781,7 +969,7 @@ async def async_kv_batch_get(
         >>> data = await tq.async_kv_batch_get(
         ...     keys=["sample_1", "sample_2"],
         ...     partition_id="train",
-        ...     fields="input_ids"
+        ...     select_fields="input_ids"
         ... )
     """
     tq_client = _maybe_create_transferqueue_client()
@@ -789,15 +977,17 @@ async def async_kv_batch_get(
     batch_meta = await tq_client.async_kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
 
     if batch_meta.size == 0:
-        raise RuntimeError("keys or partition were not found!")
+        raise ValueError("keys or partition were not found!")
 
-    if fields is not None:
-        if isinstance(fields, str):
-            fields = [fields]
-        batch_meta = batch_meta.select_fields(fields)
+    if select_fields is not None:
+        if isinstance(select_fields, str):
+            fields_to_fetch = [select_fields]
+        else:
+            fields_to_fetch = select_fields
+        batch_meta = batch_meta.select_fields(fields_to_fetch)
 
     if not batch_meta.is_ready:
-        raise RuntimeError("Some fields are not ready in all the requested keys!")
+        raise ValueError("Some fields are not ready in all the requested keys!")
 
     data = await tq_client.async_get_data(batch_meta)
     return data
