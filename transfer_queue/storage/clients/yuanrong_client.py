@@ -297,7 +297,7 @@ class GeneralKVClientAdapter(StorageStrategy):
     The serialization method uses '_decoder' and '_encoder' from 'transfer_queue.utils.serial_utils'.
     """
 
-    PUT_KEYS_LIMIT: int = 2_000
+    PUT_KEYS_LIMIT: int = 10_000
     GET_CLEAR_KEYS_LIMIT: int = 10_000
 
     # Header: number of entries (uint32, little-endian)

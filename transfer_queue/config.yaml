@@ -48,7 +48,10 @@ backend:
 
   # For Yuanrong:
   Yuanrong:
-    # Port of local yuanrong datasystem worker
+    # Whether to let TQ automatically start etcd and datasystem services
+    auto_init: True
+    # etcd service address (used to start etcd when auto_init=true)
+    etcd_address: "127.0.0.1:2379"
+    # datasystem worker host and port (used to start dscli when auto_init=true)
+    host: "127.0.0.1"
     port: 31501
-    # If enable npu transport
-    enable_yr_npu_transport: false
