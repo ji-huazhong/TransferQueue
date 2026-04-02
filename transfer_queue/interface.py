@@ -345,7 +345,7 @@ def _init_from_existing() -> bool:
 
 
 # ==================== Initialization API ====================
-def init(conf: Optional[DictConfig] = None) -> None:
+def init(conf: Optional[DictConfig] = None) -> Optional[DictConfig]:
     """Initialize the TransferQueue system.
 
     This function sets up the TransferQueue controller, distributed storage, and client.
@@ -360,6 +360,8 @@ def init(conf: Optional[DictConfig] = None) -> None:
               the default config from 'config.yaml'. This is only used for first-time
               initializing. When connecting to an existing controller, this parameter
               is ignored.
+    Returns:
+        The merged configuration dictionary.
 
     Raises:
         ValueError: If config is not valid or required configuration keys are missing.
@@ -377,7 +379,7 @@ def init(conf: Optional[DictConfig] = None) -> None:
         >>> data = tq.get_data(metadata)
     """
     if _init_from_existing():
-        return
+        return conf
 
     # First-time initialize TransferQueue
     logger.info("No TransferQueueController found. Starting first-time initialization...")
@@ -415,7 +417,7 @@ def init(conf: Optional[DictConfig] = None) -> None:
     except ValueError:
         logger.info("Some other rank has initialized TransferQueueController. Try to connect to existing controller.")
         _init_from_existing()
-        return
+        return final_conf
 
     controller_zmq_info = process_zmq_server_info(_TRANSFER_QUEUE_CONTROLLER)
     final_conf.controller.zmq_info = controller_zmq_info
@@ -429,6 +431,7 @@ def init(conf: Optional[DictConfig] = None) -> None:
 
     # create client
     _maybe_create_transferqueue_client(final_conf)
+    return final_conf
 
 
 def close():
