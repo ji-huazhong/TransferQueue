@@ -63,7 +63,7 @@ def compute_reward(response_ids: torch.Tensor) -> TensorDict:
 
 
 def compute_advantage(rewards: torch.Tensor) -> TensorDict:
-    """Simulate the process of compute advantage
+    """Simulate the process of computing advantage.
 
     Returns a TensorDict with an ``"advantage"`` field whose shape matches
     ``rewards`` (i.e. one scalar per reward).
