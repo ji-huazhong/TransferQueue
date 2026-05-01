@@ -28,7 +28,7 @@ from transfer_queue.metadata import (
     BatchMeta,
 )
 from transfer_queue.storage import (
-    TransferQueueStorageManagerFactory,
+    StorageManagerFactory,
 )
 from transfer_queue.utils.common import limit_pytorch_auto_parallel_threads
 from transfer_queue.utils.logging_utils import get_logger
@@ -92,7 +92,7 @@ class AsyncTransferQueueClient:
                     - zmq_info: ZMQ server information about the storage units
 
         """
-        self.storage_manager = TransferQueueStorageManagerFactory.create(
+        self.storage_manager = StorageManagerFactory.create(
             manager_type, controller_info=self._controller, config=config
         )
 

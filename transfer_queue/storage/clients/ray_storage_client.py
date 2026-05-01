@@ -19,8 +19,7 @@ from typing import Any, Optional
 import ray
 import torch
 
-from transfer_queue.storage.clients.base import TransferQueueStorageKVClient
-from transfer_queue.storage.clients.factory import StorageClientFactory
+from transfer_queue.storage.clients.base import StorageClientFactory, StorageKVClient
 
 
 @ray.remote(max_concurrency=8)
@@ -47,7 +46,7 @@ class RayObjectRefStorage:
 
 
 @StorageClientFactory.register("RayStorageClient")
-class RayStorageClient(TransferQueueStorageKVClient):
+class RayStorageClient(StorageKVClient):
     """
     Storage client for Ray RDT.
     """

@@ -17,6 +17,7 @@ import asyncio
 import itertools
 import os
 import time
+import warnings
 import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -32,7 +33,7 @@ from tensordict import NonTensorStack, TensorDict
 from torch import Tensor
 
 from transfer_queue.metadata import BatchMeta, extract_field_schema
-from transfer_queue.storage.clients.factory import StorageClientFactory
+from transfer_queue.storage.clients.base import StorageClientFactory
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.zmq_utils import ZMQMessage, ZMQRequestType, ZMQServerInfo, create_zmq_socket
 
@@ -49,7 +50,7 @@ LIMIT_THREADS_PER_MANAGER_IN_DRIVER = 8
 LIMIT_THREADS_PER_MANAGER_IN_RAY_ACTOR = 4
 
 
-class TransferQueueStorageManager(ABC):
+class StorageManager(ABC):
     """Base class for storage layer. It defines the interface for data operations and
     generally provides handshake & notification capabilities."""
 
@@ -364,11 +365,59 @@ class TransferQueueStorageManager(ABC):
             logger.error(f"[{self.storage_manager_id}]: Exception during __del__: {str(e)}")
 
 
-from transfer_queue.storage.managers.factory import TransferQueueStorageManagerFactory  # noqa: E402
+class StorageManagerFactory:
+    """Factory that creates a StorageManager instance."""
+
+    _registry: dict[str, type[StorageManager]] = {}
+
+    @classmethod
+    def register(cls, manager_type: str):
+        """Register a StorageManager class."""
+
+        def decorator(manager_cls: type[StorageManager]):
+            if not issubclass(manager_cls, StorageManager):
+                raise TypeError(
+                    f"manager_cls {getattr(manager_cls, '__name__', repr(manager_cls))} must be "
+                    f"a subclass of StorageManager"
+                )
+            cls._registry[manager_type] = manager_cls
+            return manager_cls
+
+        return decorator
+
+    @classmethod
+    def create(cls, manager_type: str, controller_info: ZMQServerInfo, config: dict[str, Any]) -> StorageManager:
+        """Create and return a StorageManager instance."""
+        if manager_type not in cls._registry:
+            if manager_type == "AsyncSimpleStorageManager":
+                warnings.warn(
+                    f"The manager_type {manager_type} will be deprecated in 0.1.7, please use SimpleStorage instead.",
+                    category=DeprecationWarning,
+                    stacklevel=2,
+                )
+                manager_type = "SimpleStorage"
+            elif manager_type == "MooncakeStorageManager":
+                warnings.warn(
+                    f"The manager_type {manager_type} will be deprecated in 0.1.7, please use MooncakeStore instead.",
+                    category=DeprecationWarning,
+                    stacklevel=2,
+                )
+                manager_type = "MooncakeStore"
+            elif manager_type == "YuanrongStorageManager":
+                warnings.warn(
+                    f"The manager_type {manager_type} will be deprecated in 0.1.7, please use Yuanrong instead.",
+                    category=DeprecationWarning,
+                    stacklevel=2,
+                )
+                manager_type = "Yuanrong"
+            else:
+                raise ValueError(
+                    f"Unknown manager_type: {manager_type}. Supported managers include: {list(cls._registry.keys())}"
+                )
+        return cls._registry[manager_type](controller_info, config)
 
 
-@TransferQueueStorageManagerFactory.register("KVStorageManager")
-class KVStorageManager(TransferQueueStorageManager):
+class KVStorageManager(StorageManager):
     """
     A storage manager that uses a key-value (KV) backend (e.g., YuanRong) to store and retrieve tensor data.
     It maps structured metadata (BatchMeta) to flat lists of keys and values for efficient KV operations.

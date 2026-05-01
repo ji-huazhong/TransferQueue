@@ -24,7 +24,7 @@ import ray
 import zmq
 
 from transfer_queue.utils.common import limit_pytorch_auto_parallel_threads
-from transfer_queue.utils.enum_utils import TransferQueueRole
+from transfer_queue.utils.enum_utils import Role
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.perf_utils import IntervalPerfMonitor
 from transfer_queue.utils.zmq_utils import (
@@ -205,7 +205,7 @@ class SimpleStorageUnit:
         self.worker_socket.bind(self._inproc_addr)
 
         self.zmq_server_info = ZMQServerInfo(
-            role=TransferQueueRole.STORAGE,
+            role=Role.STORAGE,
             id=str(self.storage_unit_id),
             ip=self._node_ip,
             ports={"put_get_socket": self._put_get_socket_port},

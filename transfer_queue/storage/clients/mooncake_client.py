@@ -20,8 +20,7 @@ from typing import Any, Optional
 import torch
 from torch import Tensor
 
-from transfer_queue.storage.clients.base import TransferQueueStorageKVClient
-from transfer_queue.storage.clients.factory import StorageClientFactory
+from transfer_queue.storage.clients.base import StorageClientFactory, StorageKVClient
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.tensor_utils import allocate_empty_tensors, get_nbytes, merge_contiguous_memory
 
@@ -39,7 +38,7 @@ MAX_WORKER_THREADS = 4
 
 
 @StorageClientFactory.register("MooncakeStoreClient")
-class MooncakeStoreClient(TransferQueueStorageKVClient):
+class MooncakeStoreClient(StorageKVClient):
     """
     Storage client for MooncakeStore.
     """

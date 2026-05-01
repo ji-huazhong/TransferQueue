@@ -32,7 +32,7 @@ from transfer_queue.controller import TransferQueueController
 from transfer_queue.metadata import KVBatchMeta
 from transfer_queue.sampler import *  # noqa: F401
 from transfer_queue.sampler import BaseSampler
-from transfer_queue.storage.simple_backend import SimpleStorageUnit
+from transfer_queue.storage.simple_storage import SimpleStorageUnit
 from transfer_queue.utils.common import get_placement_group
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.yuanrong_utils import (

@@ -26,7 +26,7 @@ import zmq
 import zmq.asyncio
 from ray.util import get_node_ip_address
 
-from transfer_queue.utils.enum_utils import ExplicitEnum, TransferQueueRole
+from transfer_queue.utils.enum_utils import ExplicitEnum, Role
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.serial_utils import decode, encode
 
@@ -104,7 +104,7 @@ class ZMQServerInfo:
     TransferQueue server info class.
     """
 
-    def __init__(self, role: TransferQueueRole, id: str, ip: str, ports: dict[str, int]):
+    def __init__(self, role: Role, id: str, ip: str, ports: dict[str, int]):
         self.role = role
         self.id = id
         self.ip = ip
@@ -371,7 +371,7 @@ def with_zmq_socket(
 
 def process_zmq_server_info(
     handlers: dict[Any, Any] | Any,
-):  # noqa: UP007
+):
     """Extract ZMQ server information from handler objects.
 
     Args:

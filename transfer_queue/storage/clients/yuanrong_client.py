@@ -21,8 +21,7 @@ from typing import Any, Callable, Optional
 import torch
 from torch import Tensor
 
-from transfer_queue.storage.clients.base import TransferQueueStorageKVClient
-from transfer_queue.storage.clients.factory import StorageClientFactory
+from transfer_queue.storage.clients.base import StorageClientFactory, StorageKVClient
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.serial_utils import _decoder, _encoder
 from transfer_queue.utils.yuanrong_utils import find_reachable_host
@@ -365,7 +364,7 @@ class GeneralKVClientAdapter(StorageStrategy):
 
 
 @StorageClientFactory.register("YuanrongStorageClient")
-class YuanrongStorageClient(TransferQueueStorageKVClient):
+class YuanrongStorageClient(StorageKVClient):
     """
     Storage client for YuanRong DataSystem.
 
