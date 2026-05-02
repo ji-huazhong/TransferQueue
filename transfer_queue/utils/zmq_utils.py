@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from functools import wraps
@@ -183,6 +184,50 @@ class ZMQMessage:
             body=result["body"],
             request_id=result["request_id"],
             timestamp=result["timestamp"],
+        )
+
+
+class ZMQServerTransport:
+    """Unified management of ZMQ Router Sockets, port binding, daemon threads, and message I/O."""
+
+    def __init__(self, node_ip: str, ctx: zmq.Context | None = None):
+        self.node_ip = node_ip
+        self.zmq_ctx = ctx or zmq.Context()
+        self.sockets: dict[str, zmq.Socket] = {}
+        self.ports: dict[str, int] = {}
+        self.threads: list[threading.Thread] = []
+
+    def create_router_socket(self, socket_name: str) -> None:
+        """Create a ROUTER-type socket, automatically retrying port binding."""
+        while True:
+            try:
+                port = get_free_port(ip=self.node_ip)
+                sock = create_zmq_socket(
+                    ctx=self.zmq_ctx,
+                    socket_type=zmq.ROUTER,
+                    ip=self.node_ip,
+                )
+                sock.bind(format_zmq_address(self.node_ip, port))
+                self.sockets[socket_name] = sock
+                self.ports[socket_name] = port
+                return
+            except zmq.ZMQError:
+                logger.warning(f"ZMQ bind {socket_name} failed, retrying...")
+
+    def get_socket(self, socket_name: str) -> zmq.Socket:
+        return self.sockets[socket_name]
+
+    def start_daemon_thread(self, target, name: str) -> None:
+        t = threading.Thread(target=target, name=name, daemon=True)
+        t.start()
+        self.threads.append(t)
+
+    def build_server_info(self, role: Role, server_id: str) -> ZMQServerInfo:
+        return ZMQServerInfo(
+            role=role,
+            id=server_id,
+            ip=self.node_ip,
+            ports=self.ports,
         )
 
 
