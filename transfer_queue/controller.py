@@ -1026,15 +1026,15 @@ class TransferQueueController:
         )
 
     def _start_daemon_threads(self):
-        self._transport.start_daemon_threads(
+        self._transport.start_daemon_thread(
             target=self._wait_connection,
             name="TQControllerWaitConnectionThread",
         )
-        self._transport.start_daemon_threads(
+        self._transport.start_daemon_thread(
             target=self._update_data_status,
             name="TQControllerProcessUpdateDataStatusThread",
         )
-        self._transport.start_daemon_threads(
+        self._transport.start_daemon_thread(
             target=self._process_request,
             name="TQControllerProcessRequestThread",
         )
