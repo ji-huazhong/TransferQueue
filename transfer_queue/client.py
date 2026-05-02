@@ -22,14 +22,9 @@ import torch
 import zmq
 import zmq.asyncio
 from tensordict import TensorDict
-from torch import Tensor
 
-from transfer_queue.metadata import (
-    BatchMeta,
-)
-from transfer_queue.storage import (
-    StorageManagerFactory,
-)
+from transfer_queue.metadata import BatchMeta
+from transfer_queue.storage import StorageManagerFactory
 from transfer_queue.utils.common import limit_pytorch_auto_parallel_threads
 from transfer_queue.utils.logging_utils import get_logger
 from transfer_queue.utils.zmq_utils import (
@@ -576,7 +571,7 @@ class AsyncTransferQueueClient:
         task_name: str,
         partition_id: str,
         socket: zmq.asyncio.Socket | None = None,
-    ) -> tuple[Tensor | None, Tensor | None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Get consumption status for current partition in a specific task.
 
         Args:
@@ -639,7 +634,7 @@ class AsyncTransferQueueClient:
         data_fields: list[str],
         partition_id: str,
         socket: zmq.asyncio.Socket | None = None,
-    ) -> tuple[Tensor | None, Tensor | None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Get production status for specific data fields and partition.
 
         Args:
@@ -881,21 +876,20 @@ class AsyncTransferQueueClient:
         create: bool = False,
         socket: zmq.asyncio.Socket | None = None,
     ) -> BatchMeta:
-        """Asynchronously retrieve BatchMeta from the controller using user-specified keys.
+        """Asynchronously retrieve BatchMeta by user-defined keys.
+
+        Retrieves metadata for given keys from a specified partition.
+        If keys do not exist and `create=True`, they will be automatically registered.
 
         Args:
-            keys: List of keys to retrieve from the controller
+            keys: List of keys to retrieve.
             partition_id: The ID of the logical partition to search for keys.
-            create: Whether to register new keys if not found.
-            socket: ZMQ socket (injected by decorator)
+            create:  If True, automatically create entries for missing keys.
+            socket: ZMQ socket injected by @with_controller_socket.
 
         Returns:
-            metadata: BatchMeta of the corresponding keys
-
-        Raises:
-            TypeError: If `keys` is not a list of string or a string
+            BatchMeta: Metadata for the requested keys.
         """
-
         if isinstance(keys, str):
             keys = [keys]
         elif isinstance(keys, list):
@@ -919,25 +913,23 @@ class AsyncTransferQueueClient:
         )
 
         try:
-            assert socket is not None
+            assert socket is not None, "Socket must be initialized before use"
             await socket.send_multipart(request_msg.serialize())
             response_serialized = await socket.recv_multipart(copy=False)
             response_msg = ZMQMessage.deserialize(response_serialized)
             logger.debug(
-                f"[{self.client_id}]: Client get kv_retrieve_keys response: {response_msg} "
+                f"[{self.client_id}] Received KV_RETRIEVE_META response: {response_msg} "
                 f"from controller {self._controller.id}"
             )
 
             if response_msg.request_type == ZMQRequestType.KV_RETRIEVE_META_RESPONSE:
-                metadata = response_msg.body.get("metadata", BatchMeta.empty())
-                return metadata
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to retrieve keys from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+                return response_msg.body.get("metadata", BatchMeta.empty())
+
+            raise RuntimeError(
+                f"[{self.client_id}] Failed to retrieve metadata {response_msg.body.get('message', 'Unknown error')}"
+            )
         except Exception as e:
-            raise RuntimeError(f"[{self.client_id}]: Error in kv_retrieve_keys: {str(e)}") from e
+            raise RuntimeError(f"[{self.client_id}] Failed in async_kv_retrieve_meta: {e}") from e
 
     @with_controller_socket
     async def async_kv_retrieve_keys(
@@ -1356,7 +1348,7 @@ class TransferQueueClient(AsyncTransferQueueClient):
         self,
         task_name: str,
         partition_id: str,
-    ) -> tuple[Tensor | None, Tensor | None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Synchronously get consumption status for a specific task and partition.
 
         Args:
@@ -1384,7 +1376,7 @@ class TransferQueueClient(AsyncTransferQueueClient):
         self,
         data_fields: list[str],
         partition_id: str,
-    ) -> tuple[Tensor | None, Tensor | None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Synchronously get production status for specific data fields and partition.
 
         Args:
@@ -1501,20 +1493,22 @@ class TransferQueueClient(AsyncTransferQueueClient):
         partition_id: str,
         create: bool = False,
     ) -> BatchMeta:
-        """Synchronously retrieve BatchMeta from the controller using user-specified keys.
+        """Synchronously retrieve BatchMeta by user-defined keys.
+
+        Retrieves metadata for given keys from a specified partition.
+        If keys do not exist and `create=True`, they will be automatically registered.
 
         Args:
-            keys: List of keys to retrieve from the controller
-            partition_id: The ID of the logical partition to search for keys.
-            create: Whether to register new keys if not found.
+            keys: List of keys to retrieve from the controller.
+            partition_id: Logical partition to query.
+            create: If True, automatically create entries for non-existent keys.
 
         Returns:
-            metadata: BatchMeta of the corresponding keys
+            BatchMeta: Metadata for the requested keys.
 
         Raises:
             TypeError: If `keys` is not a list of string or a string
         """
-
         return self._kv_retrieve_meta(keys=keys, partition_id=partition_id, create=create)
 
     def kv_retrieve_keys(

@@ -24,7 +24,6 @@ import psutil
 import ray
 import zmq
 import zmq.asyncio
-from ray.util import get_node_ip_address
 
 from transfer_queue.utils.enum_utils import ExplicitEnum, Role
 from transfer_queue.utils.logging_utils import get_logger
@@ -217,13 +216,13 @@ def format_zmq_address(ip: str, port: int) -> str:
         return f"tcp://{ip}:{port}"
 
 
-def get_node_ip_address_raw() -> str:
+def get_node_ip_address() -> str:
     """A wrapper around Ray's get_node_ip_address().
 
     This function intentionally returns a raw IPv4/IPv6 address WITHOUT brackets.
     """
 
-    return get_node_ip_address().strip("[]")
+    return ray.util.get_node_ip_address().strip("[]")
 
 
 def get_free_port(ip: str) -> int:

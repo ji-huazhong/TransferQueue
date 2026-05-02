@@ -17,7 +17,6 @@ import asyncio
 import itertools
 import os
 import time
-import warnings
 import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
@@ -388,32 +387,9 @@ class StorageManagerFactory:
     @classmethod
     def create(cls, manager_type: str, controller_info: ZMQServerInfo, config: dict[str, Any]) -> StorageManager:
         """Create and return a StorageManager instance."""
-        if manager_type not in cls._registry:
-            if manager_type == "AsyncSimpleStorageManager":
-                warnings.warn(
-                    f"The manager_type {manager_type} will be deprecated in 0.1.7, please use SimpleStorage instead.",
-                    category=DeprecationWarning,
-                    stacklevel=2,
-                )
-                manager_type = "SimpleStorage"
-            elif manager_type == "MooncakeStorageManager":
-                warnings.warn(
-                    f"The manager_type {manager_type} will be deprecated in 0.1.7, please use MooncakeStore instead.",
-                    category=DeprecationWarning,
-                    stacklevel=2,
-                )
-                manager_type = "MooncakeStore"
-            elif manager_type == "YuanrongStorageManager":
-                warnings.warn(
-                    f"The manager_type {manager_type} will be deprecated in 0.1.7, please use Yuanrong instead.",
-                    category=DeprecationWarning,
-                    stacklevel=2,
-                )
-                manager_type = "Yuanrong"
-            else:
-                raise ValueError(
-                    f"Unknown manager_type: {manager_type}. Supported managers include: {list(cls._registry.keys())}"
-                )
+        assert manager_type in cls._registry, (
+            f"Unknown manager_type: {manager_type}. Supported managers include: {list(cls._registry.keys())}"
+        )
         return cls._registry[manager_type](controller_info, config)
 
 

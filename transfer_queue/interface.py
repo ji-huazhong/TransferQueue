@@ -474,37 +474,32 @@ def kv_batch_put(
     tags: list[dict[str, Any]] | None = None,
     data_parser: Callable[[Any], Any] | None = None,
 ) -> KVBatchMeta:
-    """Put multiple key-value pairs to TransferQueue in batch.
+    """Batch put multiple key-value pairs into the TransferQueue.
 
-    This method stores multiple key-value pairs in a single operation, which is more
-    efficient than calling kv_put multiple times.
+    This method stores multiple key-value entries in a single operation,
+    which is significantly more efficient than repeated calls to ``kv_put``.
 
     Args:
-        keys: List of user-specified keys for the data
-        partition_id: Logical partition to store the data in
-        fields: TensorDict containing data for all keys. Must have batch_size == len(keys).
-                If not provided, will only update the newly given tags to the keys.
-        tags: List of metadata tags, one for each key
-        data_parser: Optional callable to parse reference data (e.g., URLs) into real
-                     content. The input is a slice of the `fields` parameter passed to
-                     kv_put / kv_batch_put, in plain dict format (not TensorDict),
-                     mapping field_name -> batched values. For a regular tensor column
-                     the value is a batched tensor; for nested tensors (jagged or
-                     strided) and NonTensorStack columns the values are extracted into
-                     a list. It must modify values in-place based on the original keys;
-                     do not add or remove keys. The number of elements per column must
-                     also remain unchanged. Do not change the inner order of values
-                     within each column. Only supported by SimpleStorage.
+        keys: List of user-defined unique keys for the data entries.
+        partition_id: Logical partition where the data will be stored.
+        fields: TensorDict containing batched data for all keys. Must have ``batch_size == len(keys)``.
+            If not provided, only the associated tags will be updated.
+        tags: List of metadata dictionaries, one per key.  Length must match the number of keys.
+        data_parser: Optional callable to parse raw reference data (e.g., URLs) into real content
+            before storage. The input is a plain dict (not TensorDict) mapping field names to
+            batched values. The parser  **must modify data in-place** without adding/removing
+            keys or changing element counts/order. Only supported by ``SimpleStorage`` backend.
 
     Returns:
-        KVBatchMeta: Metadata containing the keys, tags, partition_id, and fields.
-                     The `fields` attribute includes all fields stored for these samples,
-                     including any new fields written by this put operation.
+        KVBatchMeta: Metadata object containing stored keys, tags, partition ID,
+            and field information. The ``fields`` attribute includes all
+            persisted fields for the written samples.
 
     Raises:
-        ValueError: If neither `fields` nor `tags` is provided
-        ValueError: If length of `keys` doesn't match length of `tags` or the batch_size of `fields` TensorDict
-        RuntimeError: If retrieved BatchMeta size doesn't match length of `keys`
+        ValueError: When both ``fields`` and ``tags`` are empty.
+        ValueError: When ``fields`` batch size mismatches key count.
+        ValueError: When ``tags`` length mismatches key count.
+        RuntimeError: When retrieved metadata size mismatches input key count.
 
     Example:
         >>> import transfer_queue as tq
@@ -517,49 +512,37 @@ def kv_batch_put(
         ... }, batch_size=3)
         >>> tags = [{"score": 0.9}, {"score": 0.85}, {"score": 0.95}]
         >>> meta = tq.kv_batch_put(keys=keys, partition_id="train", fields=fields, tags=tags)
-        >>> print(meta.fields)  # ['input_ids', 'attention_mask']
+        >>> print(meta.fields)
     """
+    num_keys = len(keys)
 
     if fields is None and tags is None:
         raise ValueError("Please provide at least one parameter of fields or tag.")
 
-    if fields is not None and fields.batch_size[0] != len(keys):
-        raise ValueError(
-            f"`keys` with length {len(keys)} does not match the `fields` TensorDict with "
-            f"batch_size {fields.batch_size[0]}"
-        )
+    if fields is not None and fields.batch_size[0] != num_keys:
+        raise ValueError(f"Length of `keys` ({num_keys}) does not match `fields` batch size ({fields.batch_size[0]}).")
 
     tq_client = _maybe_create_tq_client()
-
-    # 1. translate user-specified key to BatchMeta
     batch_meta = tq_client.kv_retrieve_meta(keys=keys, partition_id=partition_id, create=True)
 
-    if batch_meta.size != len(keys):
-        raise RuntimeError(
-            f"Retrieved BatchMeta size {batch_meta.size} does not match with input `keys` size {len(keys)}!"
-        )
+    if batch_meta.size != num_keys:
+        raise RuntimeError(f"Retrieved BatchMeta size {batch_meta.size} does not match input `keys` size {num_keys}.")
 
-    # 2. register the user-specified tags to BatchMeta
     if tags is not None:
-        if len(tags) != len(keys):
-            raise ValueError(f"keys with length {len(keys)} does not match length of tags {len(tags)}")
+        if len(tags) != num_keys:
+            raise ValueError(f"Length of `keys` ({num_keys}) does not match length of `tags` ({len(tags)}).")
         batch_meta.update_custom_meta(tags)
 
-    # 3. put data
     if fields is not None:
-        # After put, batch_meta.field_names will include the new fields written by user
         batch_meta = tq_client.put(fields, batch_meta, data_parser=data_parser)
-    else:
-        # Directly update custom_meta (tags) to controller
+    else:  # tags is not None
         tq_client.set_custom_meta(batch_meta)
-
-    fields_to_return = batch_meta.field_names
 
     return KVBatchMeta(
         keys=keys,
         tags=batch_meta.custom_meta,
         partition_id=partition_id,
-        fields=fields_to_return,
+        fields=batch_meta.field_names,
         extra_info=batch_meta.extra_info,
     )
 

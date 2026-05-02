@@ -63,9 +63,9 @@ class MooncakeStoreClient(StorageKVClient):
             self.device_name = ""
 
         if self.local_hostname is None or self.local_hostname == "":
-            from transfer_queue.utils.zmq_utils import get_node_ip_address_raw
+            from transfer_queue.utils.zmq_utils import get_node_ip_address
 
-            ip = get_node_ip_address_raw()
+            ip = get_node_ip_address()
             logger.info(f"Try to use Ray IP ({ip}) as local hostname for MooncakeStore.")
             self.local_hostname = ip
 

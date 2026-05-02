@@ -34,7 +34,7 @@ from transfer_queue.utils.zmq_utils import (
     create_zmq_socket,
     format_zmq_address,
     get_free_port,
-    get_node_ip_address_raw,
+    get_node_ip_address,
 )
 
 logger = get_logger(__name__)
@@ -186,7 +186,7 @@ class SimpleStorageUnit:
         - worker_socket (DEALER): Backend socket for worker communication.
         """
         self.zmq_context = zmq.Context()
-        self._node_ip = get_node_ip_address_raw()
+        self._node_ip = get_node_ip_address()
 
         # Frontend: ROUTER for receiving client requests
         self.put_get_socket = create_zmq_socket(self.zmq_context, zmq.ROUTER, self._node_ip)

@@ -45,7 +45,7 @@ from transfer_queue.utils.zmq_utils import (
     create_zmq_socket,
     format_zmq_address,
     get_free_port,
-    get_node_ip_address_raw,
+    get_node_ip_address,
 )
 
 logger = get_logger(__name__)
@@ -1577,17 +1577,17 @@ class TransferQueueController:
             metadata: BatchMeta of the requested keys
         """
 
-        logger.debug(f"[{self.controller_id}]: Retrieve keys {keys} in partition {partition_id}")
+        logger.debug(f"[{self.controller_id}] Retrieve keys {keys} in partition {partition_id}")
 
+        # Ensure partition exists
         partition = self._get_partition(partition_id)
-
         if partition is None:
             if not create:
-                logger.warning(f"Partition {partition_id} were not found in controller!")
+                logger.warning(f"Partition {partition_id} not found!")
                 return BatchMeta.empty()
-            else:
-                self.create_partition(partition_id)
-                partition = self._get_partition(partition_id)
+
+            self.create_partition(partition_id)
+            partition = self._get_partition(partition_id)
 
         assert partition is not None
         global_indexes = partition.kv_retrieve_indexes(keys)
@@ -1631,9 +1631,7 @@ class TransferQueueController:
             if col_idx < len(col_mask) and col_mask[col_idx]:
                 data_fields.append(field_name)
 
-        metadata = self.generate_batch_meta(partition_id, verified_global_indexes, data_fields, mode="force_fetch")
-
-        return metadata
+        return self.generate_batch_meta(partition_id, verified_global_indexes, data_fields, mode="force_fetch")
 
     def kv_retrieve_keys(
         self,
@@ -1674,7 +1672,7 @@ class TransferQueueController:
     def _init_zmq_socket(self):
         """Initialize ZMQ sockets for communication."""
         self.zmq_context = zmq.Context()
-        self._node_ip = get_node_ip_address_raw()
+        self._node_ip = get_node_ip_address()
 
         while True:
             try:
