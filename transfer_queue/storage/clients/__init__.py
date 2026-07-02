@@ -13,12 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This module is currently empty but reserved for future client implementations
-from .base import StorageClientFactory, StorageKVClient
-from .mooncake_client import MooncakeStoreClient
-from .ray_storage_client import RayStorageClient
-from .yuanrong_client import YuanrongStorageClient
-
 __all__ = [
     "StorageKVClient",
     "StorageClientFactory",
@@ -26,3 +20,23 @@ __all__ = [
     "MooncakeStoreClient",
     "YuanrongStorageClient",
 ]
+
+_LAZY_EXPORTS = {
+    "StorageKVClient": (".base", "StorageKVClient"),
+    "StorageClientFactory": (".base", "StorageClientFactory"),
+    "RayStorageClient": (".ray_storage_client", "RayStorageClient"),
+    "MooncakeStoreClient": (".mooncake_client", "MooncakeStoreClient"),
+    "YuanrongStorageClient": (".yuanrong_client", "YuanrongStorageClient"),
+}
+
+
+def __getattr__(name):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    value = getattr(import_module(module_name, __name__), attr_name)
+    globals()[name] = value
+    return value

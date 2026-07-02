@@ -55,10 +55,43 @@ logger = get_logger(__name__)
 
 TQ_CONTROLLER_GET_METADATA_TIMEOUT = int(os.environ.get("TQ_CONTROLLER_GET_METADATA_TIMEOUT", 1))
 TQ_CONTROLLER_GET_METADATA_CHECK_INTERVAL = int(os.environ.get("TQ_CONTROLLER_GET_METADATA_CHECK_INTERVAL", 5))
+TQ_PRE_ALLOC_SAMPLE_NUM = int(os.environ.get("TQ_PRE_ALLOC_SAMPLE_NUM", 1))
 
 # Sample pre-allocation for StreamingDataLoader compatibility.
 # By pre-allocating sample indices (typically global_batch_size), consumers can accurately
 # determine consumption status even before producers have generated the samples.
+
+
+def _normalize_shape(shape: Any) -> Any:
+    """Normalize sequence shapes to tuples while preserving None and scalar-like values."""
+    if isinstance(shape, list):
+        return tuple(shape)
+    return shape
+
+
+def _normalize_per_sample_shapes(
+    per_sample_shapes: Any,
+    global_indexes: list[int],
+) -> dict[int, Any] | None:
+    """Return per-sample shapes keyed by global index.
+
+    BatchMeta/extract_field_schema may provide nested tensor shapes as a list
+    aligned with the batch, while controller internals store them by global
+    index. Accept both representations at the boundary.
+    """
+    if per_sample_shapes is None:
+        return None
+
+    if isinstance(per_sample_shapes, dict):
+        return {idx: _normalize_shape(shape) for idx, shape in per_sample_shapes.items()}
+
+    if len(per_sample_shapes) != len(global_indexes):
+        raise ValueError(
+            "'per_sample_shapes' must be either a dict keyed by global index or a "
+            "sequence aligned with incoming_global_indexes."
+        )
+
+    return {idx: _normalize_shape(shape) for idx, shape in zip(global_indexes, per_sample_shapes, strict=True)}
 
 
 class PartitionIndexManager:
@@ -117,10 +150,11 @@ class PartitionIndexManager:
             new_indexes = list(range(start_index, end_index))
 
             # Batch update status
-            self.allocated_indexes.update(new_indexes)
             self.global_index_counter = end_index
 
             indexes.extend(new_indexes)
+
+        self.allocated_indexes.update(indexes)
 
         # Record partition-index relationship
         self.partition_to_indexes[partition_id].update(indexes)
@@ -141,16 +175,18 @@ class PartitionIndexManager:
             indexes = self.partition_to_indexes.pop(partition_id)
 
             # Add released indexes to reusable pool
-            self.reusable_indexes.extend(indexes)
+            released_indexes = sorted(indexes)
+
+            self.reusable_indexes.extend(released_indexes)
 
             # Remove these indexes from allocated_indexes
-            for idx in indexes:
+            for idx in released_indexes:
                 self.allocated_indexes.discard(idx)
 
-            return list(indexes)
+            return released_indexes
         return []
 
-    def release_indexes(self, partition_id: str, indexes_to_release: list[int]):
+    def release_indexes(self, partition_id: str, indexes_to_release: list[int]) -> list[int]:
         """
         Release specific global_indexes for a partition, adding them to reusable pool.
 
@@ -167,12 +203,15 @@ class PartitionIndexManager:
             raise ValueError("Some indexes to release do not belong to the specified partition.")
 
         partition_indexes.difference_update(indexes_to_release)
-        self.reusable_indexes.extend(indexes_to_release)
-        self.allocated_indexes.difference_update(indexes_to_release)
+        released_indexes = sorted(indexes_to_release)
+        self.reusable_indexes.extend(released_indexes)
+        self.allocated_indexes.difference_update(released_indexes)
 
         # If partition has no more indexes, remove it from the mapping
         if not partition_indexes:
             self.partition_to_indexes.pop(partition_id, None)
+
+        return released_indexes
 
     def get_indexes_for_partition(self, partition_id) -> list[int]:
         """
@@ -184,7 +223,7 @@ class PartitionIndexManager:
         Returns:
             list: List of global_indexes for this partition
         """
-        return list(self.partition_to_indexes.get(partition_id, set()).copy())
+        return sorted(self.partition_to_indexes.get(partition_id, set()).copy())
 
 
 @dataclass
@@ -205,7 +244,6 @@ class FieldMeta:
 
     per_sample_shapes: dict[int, tuple] = field(default_factory=dict)  # {global_idx: shape}
 
-    # TODO: FieldMeta needs to be refactored to prevent these complicated and fragile logics
     def update(self, incoming: dict[str, Any], incoming_global_indexes: list[int]) -> None:
         """Update this field's metadata from an incoming schema dict.
 
@@ -219,60 +257,80 @@ class FieldMeta:
         Raises:
             ValueError: If incoming dtype conflicts with existing dtype.
         """
-        # dtype consistency check
-        new_dtype = incoming.get("dtype")
-        if new_dtype is not None:
-            if self.dtype is None:
-                self.dtype = new_dtype
-            elif self.dtype != new_dtype:
-                raise ValueError(
-                    f"dtype mismatch: existing={self.dtype}, incoming={new_dtype}. "
-                    f"All batches for the same field must have the same dtype."
-                )
+        self._merge_dtype(incoming.get("dtype"))
 
         new_is_nested = incoming.get("is_nested")
         new_is_non_tensor = incoming.get("is_non_tensor")
 
         if new_is_nested:
-            new_per_sample_shapes = incoming.get("per_sample_shapes", None)
-            if new_per_sample_shapes is None:
-                raise ValueError("Receiving a nested field without 'per_sample_shapes'!")
-            if self.is_nested is not None and not self.is_nested:
-                # new input is nested, but original is regular tensor.
-                # We need to write old shape into per_sample_shapes
-                assert self.shape is not None
-                for gi in self.global_indexes:
-                    self.per_sample_shapes[gi] = self.shape
-                self.is_nested = True
-                self.shape = None
-
-            # Update newly provided per_sample_shapes
-            self.per_sample_shapes.update(new_per_sample_shapes)
+            self._merge_nested_shapes(incoming, incoming_global_indexes)
 
         else:
             if not new_is_non_tensor:
-                # newly input is regular tensor
-                new_shape = incoming.get("shape", None)
-                if new_shape is None:
-                    raise ValueError("Receiving a regular tensor without 'shape'!")
-                if self.is_nested:
-                    # we need to update incoming shape into per_sample_shapes
-                    for gi in incoming_global_indexes:
-                        self.per_sample_shapes[gi] = new_shape
-                else:
-                    if self.is_non_tensor is not None and not self.is_non_tensor:
-                        # original data is also regular tensor
-                        assert self.shape is not None
-                        if self.shape != new_shape:
-                            for gi in self.global_indexes:
-                                self.per_sample_shapes[gi] = self.shape
-                            for gi in incoming_global_indexes:
-                                self.per_sample_shapes[gi] = new_shape
+                self._merge_regular_shape(incoming, incoming_global_indexes)
 
-                            self.shape = None
-                            self.is_nested = True
-
+        if new_is_nested is not None:
+            self.is_nested = bool(new_is_nested) if not self.is_nested else True
+        if new_is_non_tensor is not None:
+            self.is_non_tensor = bool(new_is_non_tensor)
         self.global_indexes.update(incoming_global_indexes)
+
+    def _merge_dtype(self, new_dtype: Any | None) -> None:
+        if new_dtype is None:
+            return
+        if self.dtype is None:
+            self.dtype = new_dtype
+            return
+        if self.dtype != new_dtype:
+            raise ValueError(
+                f"dtype mismatch: existing={self.dtype}, incoming={new_dtype}. "
+                f"All batches for the same field must have the same dtype."
+            )
+
+    def _promote_regular_to_nested(self) -> None:
+        if self.is_nested:
+            return
+        if self.shape is not None:
+            for gi in self.global_indexes:
+                self.per_sample_shapes[gi] = self.shape
+        self.shape = None
+        self.is_nested = True
+
+    def _merge_nested_shapes(self, incoming: dict[str, Any], incoming_global_indexes: list[int]) -> None:
+        new_per_sample_shapes = _normalize_per_sample_shapes(
+            incoming.get("per_sample_shapes", None),
+            incoming_global_indexes,
+        )
+        if new_per_sample_shapes is None:
+            raise ValueError("Receiving a nested field without 'per_sample_shapes'!")
+
+        if self.is_nested is not None and not self.is_nested:
+            self._promote_regular_to_nested()
+
+        self.is_nested = True
+        self.shape = None
+        self.per_sample_shapes.update(new_per_sample_shapes)
+
+    def _merge_regular_shape(self, incoming: dict[str, Any], incoming_global_indexes: list[int]) -> None:
+        new_shape = _normalize_shape(incoming.get("shape", None))
+        if new_shape is None:
+            raise ValueError("Receiving a regular tensor without 'shape'!")
+
+        if self.is_nested:
+            for gi in incoming_global_indexes:
+                self.per_sample_shapes[gi] = new_shape
+            return
+
+        if self.shape is None:
+            self.shape = new_shape
+            self.is_nested = False
+            self.is_non_tensor = False
+            return
+
+        if self.is_non_tensor is not None and not self.is_non_tensor and self.shape != new_shape:
+            self._promote_regular_to_nested()
+            for gi in incoming_global_indexes:
+                self.per_sample_shapes[gi] = new_shape
 
     def remove_samples(self, indexes: list[int]):
         """Remove sample-level data for the given indexes."""
@@ -330,7 +388,7 @@ class DataPartitionStatus:
 
     # Production status tensor - dynamically expandable
     # Values: 0 = not produced, 1 = ready for consumption
-    TQ_PRE_ALLOC_SAMPLE_NUM = int(os.environ.get("TQ_PRE_ALLOC_SAMPLE_NUM", 1))
+    TQ_PRE_ALLOC_SAMPLE_NUM = TQ_PRE_ALLOC_SAMPLE_NUM
 
     production_status: Tensor = field(
         default_factory=lambda: torch.zeros(DataPartitionStatus.TQ_PRE_ALLOC_SAMPLE_NUM, 1, dtype=torch.int8)
@@ -384,6 +442,17 @@ class DataPartitionStatus:
         """Current number of allocated rows in the tensor."""
         return self.production_status.shape[0]
 
+    @property
+    def partition_indexes(self) -> list[int]:
+        """Sorted active and pre-allocated indexes visible for this partition."""
+        return sorted(self.global_indexes | self.pre_allocated_global_indexes)
+
+    def _partition_index_tensor(self) -> Tensor:
+        return torch.tensor(self.partition_indexes, dtype=torch.long)
+
+    def _field_indices(self, field_names: list[str]) -> list[int]:
+        return [self.field_name_mapping[field] for field in field_names]
+
     # ==================== Index Pre-Allocation Methods ====================
     def register_pre_allocated_indexes(self, allocated_indexes: list[int]):
         """
@@ -403,11 +472,7 @@ class DataPartitionStatus:
 
         self.pre_allocated_global_indexes.update(allocated_indexes)
 
-        # Expand the state matrices
-        max_sample_idx = max(allocated_indexes)
-        required_samples = max_sample_idx + 1
-
-        self.ensure_samples_capacity(required_samples)
+        self.ensure_samples_capacity(max(allocated_indexes) + 1)
 
         logger.debug(f"Pre-allocated indexes in {self.partition_id}: {allocated_indexes}")
 
@@ -450,23 +515,20 @@ class DataPartitionStatus:
         """
 
         current_sample_space = self.allocated_samples_num
-        if required_samples > current_sample_space:
-            # Expand rows
-            expansion_needed = required_samples - current_sample_space
-            new_samples = current_sample_space + expansion_needed
-            new_fields = self.production_status.shape[1]
+        if required_samples <= current_sample_space:
+            return
 
-            expanded_tensor = torch.zeros(new_samples, new_fields, dtype=torch.int8)
-            expanded_tensor[:current_sample_space, :] = self.production_status
-            self.production_status = expanded_tensor
+        new_samples = required_samples
+        expanded_tensor = torch.zeros(new_samples, self.allocated_fields_num, dtype=torch.int8)
+        expanded_tensor[:current_sample_space, :] = self.production_status
+        self.production_status = expanded_tensor
 
-            # Update consumption tensors for all tasks
-            for task_name, consumption_tensor in self.consumption_status.items():
-                expanded_consumption = torch.zeros(new_samples, dtype=torch.int8)
-                expanded_consumption[:current_sample_space] = consumption_tensor
-                self.consumption_status[task_name] = expanded_consumption
+        for task_name, consumption_tensor in self.consumption_status.items():
+            expanded_consumption = torch.zeros(new_samples, dtype=torch.int8)
+            expanded_consumption[:current_sample_space] = consumption_tensor
+            self.consumption_status[task_name] = expanded_consumption
 
-            logger.debug(f"Expanded partition {self.partition_id} from {current_sample_space} to {new_samples} samples")
+        logger.debug(f"Expanded partition {self.partition_id} from {current_sample_space} to {new_samples} samples")
 
     def ensure_fields_capacity(self, required_fields: int) -> None:
         """
@@ -476,18 +538,37 @@ class DataPartitionStatus:
             required_fields: Minimum number of fields needed
         """
 
-        current_fields = self.production_status.shape[1]
-        if required_fields > current_fields:
-            # Expand columns
-            expansion_needed = required_fields - current_fields
-            new_fields = current_fields + expansion_needed
-            new_samples = self.production_status.shape[0]
+        current_fields = self.allocated_fields_num
+        if required_fields <= current_fields:
+            return
 
-            expanded_tensor = torch.zeros(new_samples, new_fields, dtype=torch.int8)
-            expanded_tensor[:, :current_fields] = self.production_status
-            self.production_status = expanded_tensor
+        new_fields = required_fields
+        expanded_tensor = torch.zeros(self.allocated_samples_num, new_fields, dtype=torch.int8)
+        expanded_tensor[:, :current_fields] = self.production_status
+        self.production_status = expanded_tensor
 
-            logger.debug(f"Expanded partition {self.partition_id} from {current_fields} to {new_fields} fields")
+        logger.debug(f"Expanded partition {self.partition_id} from {current_fields} to {new_fields} fields")
+
+    def _ensure_task_consumption_status(self, task_name: str) -> Tensor:
+        if task_name not in self.consumption_status:
+            self.consumption_status[task_name] = torch.zeros(self.allocated_samples_num, dtype=torch.int8)
+        return self.consumption_status[task_name]
+
+    def _register_fields(self, field_names: list[str]) -> None:
+        new_fields = [field for field in field_names if field not in self.field_name_mapping]
+        if not new_fields:
+            return
+
+        for field in new_fields:
+            self.field_name_mapping[field] = len(self.field_name_mapping)
+        self.ensure_fields_capacity(len(self.field_name_mapping))
+
+    def _mark_fields_produced(self, global_indices: list[int], field_names: list[str]) -> None:
+        if not global_indices or not field_names:
+            return
+        sample_indices = torch.tensor(global_indices, dtype=torch.long)[:, None]
+        field_indices = torch.tensor(self._field_indices(field_names), dtype=torch.long)
+        self.production_status[sample_indices, field_indices] = 1
 
     # ==================== Production Status Interface ====================
     def update_production_status(
@@ -519,27 +600,10 @@ class DataPartitionStatus:
             # Derive field_names from field_schema to guarantee consistency
             field_names = list(field_schema.keys())
 
-            # Determine required capacity
-            max_sample_idx = max(global_indices) if global_indices else -1
-            required_samples = max_sample_idx + 1
-
-            # Ensure we have enough rows
-            self.ensure_samples_capacity(required_samples)
-
-            # Register new fields if needed
-            new_fields = [f for f in field_names if f not in self.field_name_mapping]
-            if new_fields:
-                # Add new fields to mapping
-                for f in new_fields:
-                    self.field_name_mapping[f] = len(self.field_name_mapping)
-
-                required_fields = len(self.field_name_mapping)
-                self.ensure_fields_capacity(required_fields)
-
-            # Update production status
-            if self.production_status is not None and global_indices and field_names:
-                field_indices = [self.field_name_mapping.get(f) for f in field_names]
-                self.production_status[torch.tensor(global_indices)[:, None], torch.tensor(field_indices)] = 1
+            if global_indices:
+                self.ensure_samples_capacity(max(global_indices) + 1)
+            self._register_fields(field_names)
+            self._mark_fields_produced(global_indices, field_names)
 
             # Update field metadata
             self._update_field_metadata(global_indices, field_schema, custom_backend_meta)
@@ -565,13 +629,14 @@ class DataPartitionStatus:
 
         for field_name, meta in field_schema.items():
             if field_name not in self.field_metadata:
+                per_sample_shapes = _normalize_per_sample_shapes(meta.get("per_sample_shapes"), global_indexes) or {}
                 self.field_metadata[field_name] = FieldMeta(
                     global_indexes=set(global_indexes),
                     dtype=meta.get("dtype"),
-                    shape=meta.get("shape"),
+                    shape=_normalize_shape(meta.get("shape")),
                     is_nested=meta.get("is_nested", False),
                     is_non_tensor=meta.get("is_non_tensor", False),
-                    per_sample_shapes=meta.get("per_sample_shapes", {}),
+                    per_sample_shapes=per_sample_shapes,
                 )
             else:
                 self.field_metadata[field_name].update(meta, global_indexes)
@@ -592,16 +657,20 @@ class DataPartitionStatus:
             global_indices: List of sample indices to mark as consumed
 
         """
+        consumption_status = None
         try:
+            if global_indices:
+                self.ensure_samples_capacity(max(global_indices) + 1)
             _, consumption_status = self.get_consumption_status(task_name, mask=False)
 
             if consumption_status.numel() > 0 and global_indices:
                 consumption_status[global_indices] = 1
         except Exception as e:
+            status_shape = None if consumption_status is None else consumption_status.shape
             logger.error(
                 f"Error marking samples consumed for partition {self.partition_id}, task {task_name}: {e}. "
                 f"Target global_indices {global_indices}, but current consumption_status has "
-                f"shape {consumption_status.shape}"
+                f"shape {status_shape}"
             )
 
     # ==================== Consumption Status Interface ====================
@@ -620,22 +689,14 @@ class DataPartitionStatus:
             - Consumption status tensor for the specified task. 1 for consumed, 0 for not consumed.
         """
 
-        if task_name not in self.consumption_status:
-            if self.production_status is not None:
-                self.consumption_status[task_name] = torch.zeros(self.allocated_samples_num, dtype=torch.int8)
-            else:
-                self.consumption_status[task_name] = torch.zeros(0, dtype=torch.int8)
-
-        # Get consumption status for requested task
-        partition_global_index = torch.tensor(
-            sorted(self.global_indexes | self.pre_allocated_global_indexes), dtype=torch.long
-        )
+        consumption_tensor = self._ensure_task_consumption_status(task_name)
+        partition_global_index = self._partition_index_tensor()
 
         if mask:
             if partition_global_index.numel() == 0:
-                empty_status = self.consumption_status[task_name].new_zeros(0)
+                empty_status = consumption_tensor.new_zeros(0)
                 return partition_global_index, empty_status
-            self.ensure_samples_capacity(max(partition_global_index) + 1)
+            self.ensure_samples_capacity(int(partition_global_index[-1].item()) + 1)
             consumption_status = self.consumption_status[task_name][partition_global_index]
         else:
             consumption_status = self.consumption_status[task_name]
@@ -682,22 +743,12 @@ class DataPartitionStatus:
         if field_names is None or len(field_names) == 0:
             return None, None
 
-        # Check if all requested fields are registered
-        for field_name in field_names:
-            if field_name not in self.field_name_mapping:
-                return None, None
+        if any(field_name not in self.field_name_mapping for field_name in field_names):
+            return None, None
 
-        # Create column mask for requested fields
-        col_mask = torch.zeros(self.allocated_fields_num, dtype=torch.bool)
-        field_indices = [self.field_name_mapping[field] for field in field_names]
-        if field_indices:
-            col_mask[field_indices] = True
+        production_status = self.production_status[:, self._field_indices(field_names)]
 
-        production_status = self.production_status[:, col_mask]
-
-        partition_global_index = torch.tensor(
-            sorted(self.global_indexes | self.pre_allocated_global_indexes), dtype=torch.long
-        )
+        partition_global_index = self._partition_index_tensor()
 
         if mask:
             production_status = production_status[partition_global_index]
@@ -718,27 +769,21 @@ class DataPartitionStatus:
             List of sample indices that are ready for consumption
         """
 
-        # Check if all requested fields are registered
-        for field_name in field_names:
-            if field_name not in self.field_name_mapping:
-                return []
+        if any(field_name not in self.field_name_mapping for field_name in field_names):
+            return []
 
-        row_mask = torch.ones(self.allocated_samples_num, dtype=torch.bool)
+        active_indexes = sorted(self.global_indexes)
+        if not active_indexes:
+            return []
 
-        # Apply consumption filter (exclude already consumed samples)
+        row_mask = torch.zeros(self.allocated_samples_num, dtype=torch.bool)
+        row_mask[active_indexes] = True
+
         _, consumption_status = self.get_consumption_status(task_name, mask=False)
         if consumption_status is not None:
-            unconsumed_mask = consumption_status == 0
-            row_mask &= unconsumed_mask
+            row_mask &= consumption_status == 0
 
-        # Create column mask for requested fields
-        col_mask = torch.zeros(self.allocated_fields_num, dtype=torch.bool)
-        field_indices = [self.field_name_mapping[field] for field in field_names]
-        if field_indices:
-            col_mask[field_indices] = True
-
-        # Filter production status by masks
-        relevant_status = self.production_status[row_mask][:, col_mask]
+        relevant_status = self.production_status[row_mask][:, self._field_indices(field_names)]
 
         # Check if all required fields are ready for each sample
         all_fields_ready = torch.all(relevant_status, dim=1)
@@ -1020,8 +1065,6 @@ class TransferQueueController:
         Returns:
             True if partition was created successfully, False if it already exists
         """
-        TQ_PRE_ALLOC_SAMPLE_NUM = int(os.environ.get("TQ_PRE_ALLOC_SAMPLE_NUM", 1))
-
         if partition_id in self.partitions:
             logger.warning(f"Partition {partition_id} already exists")
             return False
@@ -1046,6 +1089,28 @@ class TransferQueueController:
             DataPartitionStatus object if partition exists, None otherwise
         """
         return self.partitions.get(partition_id)
+
+    def _get_or_create_partition(self, partition_id: str) -> DataPartitionStatus:
+        if partition_id not in self.partitions:
+            self.create_partition(partition_id)
+
+        partition = self._get_partition(partition_id)
+        assert partition is not None
+        return partition
+
+    def _allocate_indexes_for_partition(self, partition_id: str, count: int) -> list[int]:
+        """Allocate indexes for a partition, consuming pre-allocated indexes first."""
+        partition = self._get_or_create_partition(partition_id)
+        batch_global_indexes = partition.activate_pre_allocated_indexes(count)
+
+        missing_count = count - len(batch_global_indexes)
+        if missing_count > 0:
+            batch_global_indexes.extend(self.index_manager.allocate_indexes(partition_id, count=missing_count))
+
+        partition.global_indexes.update(batch_global_indexes)
+        if batch_global_indexes:
+            partition.ensure_samples_capacity(max(batch_global_indexes) + 1)
+        return batch_global_indexes
 
     def get_partition_snapshot(self, partition_id: str) -> DataPartitionStatus | None:
         """
@@ -1238,108 +1303,122 @@ class TransferQueueController:
         """
 
         if mode == "insert":
-            if partition_id not in self.partitions:
-                self.create_partition(partition_id)
-
-            partition = self._get_partition(partition_id)
-            if data_fields is None:
-                raise RuntimeError("Must provide data_fields for inserting new data")
-
-            # This is called during put_data call without providing metadata.
-            # try to use pre-allocated global index first
-
-            if batch_size is None:
-                raise ValueError("must provide batch_size for inserting new data")
-
-            assert partition is not None
-            batch_global_indexes = partition.activate_pre_allocated_indexes(batch_size)
-
-            if len(batch_global_indexes) < batch_size:
-                new_global_indexes = self.index_manager.allocate_indexes(
-                    partition_id, count=(batch_size - len(batch_global_indexes))
-                )
-                batch_global_indexes.extend(new_global_indexes)
-
-            # register global_indexes in partition
-            partition.global_indexes.update(batch_global_indexes)
-
-            return self.generate_batch_meta(partition_id, batch_global_indexes, data_fields, mode)
-
+            return self._get_insert_metadata(data_fields, partition_id, batch_size)
         if mode == "fetch":
-            assert task_name is not None
-            # Find ready samples within current data partition and package into BatchMeta when reading
-
-            if batch_size is None:
-                raise ValueError("must provide batch_size in fetch mode")
-
-            start_time = time.time()
-            while True:
-                # ready_for_consume_indexes: samples where all required fields are produced
-                # (production status is ready) and not yet consumed
-                ready_for_consume_indexes = self.scan_data_status(partition_id, data_fields, task_name)
-
-                if len(ready_for_consume_indexes) < batch_size:
-                    if self.polling_mode:
-                        # Return cached result if available
-                        if self.sampler.has_cached_result(partition_id, task_name, sampling_config):
-                            break
-                        else:
-                            logger.debug(
-                                f"[{self.controller_id}]: Not enough data for task {task_name} in "
-                                f"partition {partition_id}. Required: {batch_size}, "
-                                f"Available: {len(ready_for_consume_indexes)}."
-                                f" Returning None due to polling mode."
-                            )
-                            return BatchMeta.empty()
-                    else:
-                        logger.warning(
-                            f"[{self.controller_id}]: Insufficient data for task {task_name}. Required: {batch_size} "
-                            f"samples with fields {data_fields} in partition {partition_id}, but only have "
-                            f"{len(ready_for_consume_indexes)} samples meeting the criteria. "
-                            f"Retrying in {TQ_CONTROLLER_GET_METADATA_CHECK_INTERVAL}s..."
-                        )
-                        time.sleep(TQ_CONTROLLER_GET_METADATA_CHECK_INTERVAL)
-                    if time.time() - start_time > TQ_CONTROLLER_GET_METADATA_TIMEOUT:
-                        raise TimeoutError(
-                            f"Timeout while waiting for sufficient data for task {task_name}. "
-                            f"Required: {batch_size}, Available: {len(ready_for_consume_indexes)}"
-                        )
-                else:
-                    break
-
-            batch_global_indexes, consumed_indexes = self.sampler(
-                ready_for_consume_indexes,
+            return self._get_fetch_metadata(
+                data_fields,
+                partition_id,
+                task_name,
                 batch_size,
-                partition=self._get_partition(partition_id),
-                **(sampling_config or {}),
+                sampling_config,
                 **kwargs,
             )
+        if mode == "force_fetch":
+            return self._get_force_fetch_metadata(data_fields, partition_id)
 
-            # Check if we got valid results from the sampler.
-            # Some samplers (e.g. SeqlenBalancedSampler) may return variable-size
-            # batches per DP rank, so we only check for empty results.
-            if len(batch_global_indexes) == 0:
-                if self.polling_mode:
-                    return BatchMeta.empty()
-                raise RuntimeError(
-                    f"Sampler returned no samples. Please check the sampler logic. "
-                    f"Expected: {batch_size}, before sampling: {len(ready_for_consume_indexes)}, "
-                    f"after sampling: {len(batch_global_indexes)}"
+        raise ValueError(f"Invalid mode: {mode}")
+
+    def _get_insert_metadata(
+        self,
+        data_fields: list[str],
+        partition_id: str,
+        batch_size: int | None,
+    ) -> BatchMeta:
+        if data_fields is None:
+            raise RuntimeError("Must provide data_fields for inserting new data")
+        if batch_size is None:
+            raise ValueError("must provide batch_size for inserting new data")
+
+        batch_global_indexes = self._allocate_indexes_for_partition(partition_id, batch_size)
+        return self.generate_batch_meta(partition_id, batch_global_indexes, data_fields, mode="insert")
+
+    def _get_fetch_metadata(
+        self,
+        data_fields: list[str],
+        partition_id: str,
+        task_name: str | None,
+        batch_size: int | None,
+        sampling_config: dict[str, Any] | None,
+        **kwargs,
+    ) -> BatchMeta:
+        if task_name is None:
+            raise ValueError("must provide task_name in fetch mode")
+        if batch_size is None:
+            raise ValueError("must provide batch_size in fetch mode")
+
+        ready_for_consume_indexes = self._wait_for_ready_indexes(
+            partition_id=partition_id,
+            data_fields=data_fields,
+            task_name=task_name,
+            batch_size=batch_size,
+            sampling_config=sampling_config,
+        )
+        if ready_for_consume_indexes is None:
+            return BatchMeta.empty()
+
+        batch_global_indexes, consumed_indexes = self.sampler(
+            ready_for_consume_indexes,
+            batch_size,
+            partition=self._get_partition(partition_id),
+            **(sampling_config or {}),
+            **kwargs,
+        )
+
+        if len(batch_global_indexes) == 0:
+            if self.polling_mode:
+                return BatchMeta.empty()
+            raise RuntimeError(
+                f"Sampler returned no samples. Please check the sampler logic. "
+                f"Expected: {batch_size}, before sampling: {len(ready_for_consume_indexes)}, "
+                f"after sampling: {len(batch_global_indexes)}"
+            )
+
+        if consumed_indexes:
+            self.partitions[partition_id].mark_consumed(task_name, consumed_indexes)
+
+        return self.generate_batch_meta(partition_id, batch_global_indexes, data_fields, mode="fetch")
+
+    def _wait_for_ready_indexes(
+        self,
+        partition_id: str,
+        data_fields: list[str],
+        task_name: str,
+        batch_size: int,
+        sampling_config: dict[str, Any] | None,
+    ) -> list[int] | None:
+        start_time = time.time()
+        while True:
+            ready_for_consume_indexes = self.scan_data_status(partition_id, data_fields, task_name)
+            if len(ready_for_consume_indexes) >= batch_size:
+                return ready_for_consume_indexes
+
+            if self.polling_mode:
+                if self.sampler.has_cached_result(partition_id, task_name, sampling_config):
+                    return ready_for_consume_indexes
+                logger.debug(
+                    f"[{self.controller_id}]: Not enough data for task {task_name} in "
+                    f"partition {partition_id}. Required: {batch_size}, "
+                    f"Available: {len(ready_for_consume_indexes)}. Returning None due to polling mode."
+                )
+                return None
+
+            logger.warning(
+                f"[{self.controller_id}]: Insufficient data for task {task_name}. Required: {batch_size} "
+                f"samples with fields {data_fields} in partition {partition_id}, but only have "
+                f"{len(ready_for_consume_indexes)} samples meeting the criteria. "
+                f"Retrying in {TQ_CONTROLLER_GET_METADATA_CHECK_INTERVAL}s..."
+            )
+            time.sleep(TQ_CONTROLLER_GET_METADATA_CHECK_INTERVAL)
+
+            if time.time() - start_time > TQ_CONTROLLER_GET_METADATA_TIMEOUT:
+                raise TimeoutError(
+                    f"Timeout while waiting for sufficient data for task {task_name}. "
+                    f"Required: {batch_size}, Available: {len(ready_for_consume_indexes)}"
                 )
 
-            # Mark samples as consumed if in fetch mode
-            if consumed_indexes:
-                partition = self.partitions[partition_id]
-                partition.mark_consumed(task_name, consumed_indexes)
-
-        elif mode == "force_fetch":
-            batch_global_indexes = self.index_manager.get_indexes_for_partition(partition_id)
-            consumed_indexes = []
-
-        # Package into metadata
-        metadata = self.generate_batch_meta(partition_id, batch_global_indexes, data_fields, mode)
-
-        return metadata
+    def _get_force_fetch_metadata(self, data_fields: list[str], partition_id: str) -> BatchMeta:
+        batch_global_indexes = self.index_manager.get_indexes_for_partition(partition_id)
+        return self.generate_batch_meta(partition_id, batch_global_indexes, data_fields, mode="force_fetch")
 
     def scan_data_status(
         self,
@@ -1609,24 +1688,13 @@ class TransferQueueController:
                 )
             else:
                 # create non-exist keys
-                batch_global_indexes = partition.activate_pre_allocated_indexes(len(none_indexes))
-
-                if len(batch_global_indexes) < len(none_indexes):
-                    new_global_indexes = self.index_manager.allocate_indexes(
-                        partition_id, count=(len(none_indexes) - len(batch_global_indexes))
-                    )
-                    batch_global_indexes.extend(new_global_indexes)
-
-                # register global_indexes in partition
-                partition.global_indexes.update(batch_global_indexes)
+                batch_global_indexes = self._allocate_indexes_for_partition(partition_id, len(none_indexes))
 
                 # register key-global_indexes mapping in partition
                 for i in range(len(none_indexes)):
                     global_indexes[none_indexes[i]] = batch_global_indexes[i]
                     partition.keys_mapping[keys[none_indexes[i]]] = batch_global_indexes[i]
                     partition.revert_keys_mapping[batch_global_indexes[i]] = keys[none_indexes[i]]
-
-                partition.ensure_samples_capacity(max(batch_global_indexes) + 1)
 
         verified_global_indexes = [idx for idx in global_indexes if idx is not None]
 

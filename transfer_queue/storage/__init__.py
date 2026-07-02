@@ -13,16 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .managers import (
-    AsyncSimpleStorageManager,
-    MooncakeStorageManager,
-    RayStorageManager,
-    StorageManager,
-    StorageManagerFactory,
-    YuanrongStorageManager,
-)
-from .simple_storage import SimpleStorageUnit, StorageUnitData
-
 __all__ = [
     "SimpleStorageUnit",
     "StorageUnitData",
@@ -33,3 +23,26 @@ __all__ = [
     "YuanrongStorageManager",
     "RayStorageManager",
 ]
+
+_LAZY_EXPORTS = {
+    "SimpleStorageUnit": (".simple_storage", "SimpleStorageUnit"),
+    "StorageUnitData": (".simple_storage", "StorageUnitData"),
+    "StorageManager": (".managers", "StorageManager"),
+    "StorageManagerFactory": (".managers", "StorageManagerFactory"),
+    "AsyncSimpleStorageManager": (".managers", "AsyncSimpleStorageManager"),
+    "MooncakeStorageManager": (".managers", "MooncakeStorageManager"),
+    "YuanrongStorageManager": (".managers", "YuanrongStorageManager"),
+    "RayStorageManager": (".managers", "RayStorageManager"),
+}
+
+
+def __getattr__(name):
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from importlib import import_module
+
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    value = getattr(import_module(module_name, __name__), attr_name)
+    globals()[name] = value
+    return value

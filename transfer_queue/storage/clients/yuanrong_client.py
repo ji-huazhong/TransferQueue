@@ -22,13 +22,13 @@ from torch import Tensor
 
 from transfer_queue.storage.clients.base import StorageClientFactory, StorageKVClient
 from transfer_queue.utils.logging_utils import get_logger
-from transfer_queue.utils.serial_utils import batch_decode_from, batch_encode_into
 from transfer_queue.utils.yuanrong_utils import find_reachable_host
 
 logger = get_logger(__name__)
 
 
 YUANRONG_DATASYSTEM_IMPORTED: bool = True
+datasystem: Any | None = None
 
 try:
     from yr import datasystem
@@ -277,6 +277,8 @@ class GeneralKVClientAdapter(StorageStrategy):
             buffers.extend(mcreate_bufs)
             return [buf.MutableData() for buf in mcreate_bufs]
 
+        from transfer_queue.utils.serial_utils import batch_encode_into
+
         batch_encode_into(objs, alloc, num_workers=self.DS_MAX_WORKERS)
         self._ds_client.mset_buffer(buffers)
 
@@ -297,6 +299,8 @@ class GeneralKVClientAdapter(StorageStrategy):
                 f"Returned results will contain None for these keys."
             )
         valid_bufs = [buffers[i] for i in valid_indexes]
+        from transfer_queue.utils.serial_utils import batch_decode_from
+
         decoded_objs = batch_decode_from(valid_bufs)
         results = [None] * len(keys)
         for idx, obj in zip(valid_indexes, decoded_objs, strict=True):
