@@ -371,51 +371,15 @@ def kv_put(
         ... )
         >>> print(meta.fields)  # ['input_ids']
     """
-    if fields is None and tag is None:
-        raise ValueError("Please provide at least one parameter of `fields` or `tag`.")
-
     tq_client = _maybe_create_tq_client()
-
-    # 1. translate user-specified key to BatchMeta
-    batch_meta = tq_client.kv_retrieve_meta(keys=[key], partition_id=partition_id, create=True)
-
-    if batch_meta.size != 1:
-        raise RuntimeError(f"Retrieved BatchMeta size {batch_meta.size} does not match with input `key` size of 1!")
-
-    # 2. register the user-specified tag to BatchMeta
-    if tag is not None:
-        batch_meta.update_custom_meta([tag])
-
-    # 3. put data
-    if fields is not None:
-        if isinstance(fields, dict):
-            # TODO: consider whether to support this...
-            batch = {}
-            for field_name, value in fields.items():
-                if isinstance(value, torch.Tensor):
-                    if value.is_nested:
-                        raise ValueError("Please use (async)kv_batch_put for batch operation")
-                    batch[field_name] = value.unsqueeze(0)
-                else:
-                    batch[field_name] = NonTensorStack(value)
-            fields = TensorDict(batch, batch_size=[1])
-        elif not isinstance(fields, TensorDict):
-            raise ValueError("`fields` can only be dict or TensorDict")
-
-        # After put, batch_meta.field_names will include the new fields written by user
-        batch_meta = tq_client.put(fields, batch_meta, data_parser=data_parser)
-    else:
-        # Directly update custom_meta (tag) to controller
-        tq_client.set_custom_meta(batch_meta)
-
-    fields_to_return = batch_meta.field_names
-
-    return KVBatchMeta(
-        keys=[key],
-        tags=batch_meta.custom_meta,
-        partition_id=partition_id,
-        fields=fields_to_return,
-        extra_info=batch_meta.extra_info,
+    return tq_client._run_coroutine(
+        async_kv_put(
+            key=key,
+            partition_id=partition_id,
+            fields=fields,
+            tag=tag,
+            data_parser=data_parser,
+        )
     )
 
 
@@ -466,36 +430,15 @@ def kv_batch_put(
         >>> meta = tq.kv_batch_put(keys=keys, partition_id="train", fields=fields, tags=tags)
         >>> print(meta.fields)
     """
-    num_keys = len(keys)
-
-    if fields is None and tags is None:
-        raise ValueError("Please provide at least one parameter of fields or tag.")
-
-    if fields is not None and fields.batch_size[0] != num_keys:
-        raise ValueError(f"Length of `keys` ({num_keys}) does not match `fields` batch size ({fields.batch_size[0]}).")
-
     tq_client = _maybe_create_tq_client()
-    batch_meta = tq_client.kv_retrieve_meta(keys=keys, partition_id=partition_id, create=True)
-
-    if batch_meta.size != num_keys:
-        raise RuntimeError(f"Retrieved BatchMeta size {batch_meta.size} does not match input `keys` size {num_keys}.")
-
-    if tags is not None:
-        if len(tags) != num_keys:
-            raise ValueError(f"Length of `keys` ({num_keys}) does not match length of `tags` ({len(tags)}).")
-        batch_meta.update_custom_meta(tags)
-
-    if fields is not None:
-        batch_meta = tq_client.put(fields, batch_meta, data_parser=data_parser)
-    else:  # tags is not None
-        tq_client.set_custom_meta(batch_meta)
-
-    return KVBatchMeta(
-        keys=keys,
-        tags=batch_meta.custom_meta,
-        partition_id=partition_id,
-        fields=batch_meta.field_names,
-        extra_info=batch_meta.extra_info,
+    return tq_client._run_coroutine(
+        async_kv_batch_put(
+            keys=keys,
+            partition_id=partition_id,
+            fields=fields,
+            tags=tags,
+            data_parser=data_parser,
+        )
     )
 
 
@@ -535,23 +478,8 @@ def kv_batch_get_by_meta(meta: KVBatchMeta, select_fields: list[str] | str | Non
         >>> # Then retrieve it using the returned metadata
         >>> data = tq.kv_batch_get_by_meta(meta)
     """
-    if meta.partition_id is None:
-        raise ValueError("Must provide partition_id in the input KVBatchMeta.")
-    if select_fields is not None:
-        if isinstance(select_fields, str):
-            fields_to_fetch: list[str] | None = [select_fields]
-        else:
-            fields_to_fetch = select_fields
-
-        assert fields_to_fetch is not None
-        if meta.fields is None or any(f not in meta.fields for f in fields_to_fetch):
-            raise ValueError(
-                f"Some fields assigned in select_fields not found in the metadata. "
-                f"Assigned: {fields_to_fetch}; Fields in KVBatchMeta: {meta.fields}."
-            )
-    else:
-        fields_to_fetch = meta.fields
-    return kv_batch_get(keys=meta.keys, partition_id=meta.partition_id, select_fields=fields_to_fetch)
+    tq_client = _maybe_create_tq_client()
+    return tq_client._run_coroutine(async_kv_batch_get_by_meta(meta=meta, select_fields=select_fields))
 
 
 def kv_batch_get(keys: list[str] | str, partition_id: str, select_fields: list[str] | str | None = None) -> TensorDict:
@@ -584,25 +512,9 @@ def kv_batch_get(keys: list[str] | str, partition_id: str, select_fields: list[s
         ... )
     """
     tq_client = _maybe_create_tq_client()
-
-    batch_meta = tq_client.kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
-
-    if batch_meta.size == 0:
-        raise ValueError("keys or partition were not found!")
-
-    fields_to_fetch: list[str] | None
-    if select_fields is not None:
-        if isinstance(select_fields, str):
-            fields_to_fetch = [select_fields]
-        else:
-            fields_to_fetch = select_fields
-        batch_meta = batch_meta.select_fields(fields_to_fetch)
-
-    if not batch_meta.is_ready:
-        raise ValueError("Some fields are not ready in all the requested keys!")
-
-    data = tq_client.get_data(batch_meta)
-    return data
+    return tq_client._run_coroutine(
+        async_kv_batch_get(keys=keys, partition_id=partition_id, select_fields=select_fields)
+    )
 
 
 def kv_list(partition_id: str | None = None) -> dict[str, dict[str, Any]]:
@@ -640,10 +552,7 @@ def kv_list(partition_id: str | None = None) -> dict[str, dict[str, Any]]:
         >>>     print(f"Partition: {pid}, Key count: {len(keys)}")
     """
     tq_client = _maybe_create_tq_client()
-
-    partition_info = tq_client.kv_list(partition_id)
-
-    return partition_info
+    return tq_client._run_coroutine(async_kv_list(partition_id=partition_id))
 
 
 def kv_clear(keys: list[str] | str, partition_id: str) -> None:
@@ -665,14 +574,8 @@ def kv_clear(keys: list[str] | str, partition_id: str) -> None:
         >>> tq.kv_clear(keys=["sample_1", "sample_2"], partition_id="train")
     """
 
-    if isinstance(keys, str):
-        keys = [keys]
-
     tq_client = _maybe_create_tq_client()
-    batch_meta = tq_client.kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
-
-    if batch_meta.size > 0:
-        tq_client.clear_samples(batch_meta)
+    tq_client._run_coroutine(async_kv_clear(keys=keys, partition_id=partition_id))
 
 
 # ==================== KV Interface API ====================

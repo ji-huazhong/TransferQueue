@@ -212,6 +212,61 @@ def assert_nested_tensor_equal(nested_a, nested_b, msg=""):
         assert torch.equal(a, b), f"{msg} Component {i} not equal: {a} vs {b}"
 
 
+class TestRayWorkerKVInterfaceE2E:
+    @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+    def test_kv_api_inside_remote_worker(self, tq_system, use_async):
+        # Pytest test modules are not importable on Ray workers, so keep this local
+        # and let cloudpickle serialize the function by value.
+        @ray.remote
+        def run_kv_api_in_worker(partition_id: str, key: str, use_async: bool) -> dict:
+            import asyncio
+
+            import torch
+
+            import transfer_queue as tq
+
+            tq.init()
+
+            def call(api_name, *args, **kwargs):
+                api = getattr(tq, f"async_{api_name}" if use_async else api_name)
+                result = api(*args, **kwargs)
+                return asyncio.run(result) if use_async else result
+
+            meta = call(
+                "kv_put",
+                key=key,
+                partition_id=partition_id,
+                fields={"data": torch.tensor([1, 2, 3])},
+                tag={"source": "ray_worker"},
+            )
+            data = call("kv_batch_get", keys=key, partition_id=partition_id)
+            keys_before_clear = call("kv_list", partition_id=partition_id)
+            call("kv_clear", keys=key, partition_id=partition_id)
+            keys_after_clear = call("kv_list", partition_id=partition_id)
+
+            return {
+                "fields": meta.fields,
+                "data": list(data["data"])[0].tolist(),
+                "listed_before_clear": key in keys_before_clear.get(partition_id, {}),
+                "listed_after_clear": key in keys_after_clear.get(partition_id, {}),
+            }
+
+        mode = "async" if use_async else "sync"
+        result = ray.get(
+            run_kv_api_in_worker.remote(
+                partition_id=f"ray_worker_{mode}_partition",
+                key=f"ray_worker_{mode}_key",
+                use_async=use_async,
+            ),
+            timeout=60,
+        )
+
+        assert result["fields"] == ["data"]
+        assert result["data"] == [1, 2, 3]
+        assert result["listed_before_clear"] is True
+        assert result["listed_after_clear"] is False
+
+
 class TestKVPutE2E:
     """End-to-end tests for kv_put functionality."""
 

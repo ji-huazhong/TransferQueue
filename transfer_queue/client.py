@@ -176,6 +176,33 @@ class AsyncTransferQueueClient:
             zmq_context=self.zmq_context,
         )
 
+    async def _request_controller(
+        self,
+        socket: zmq.asyncio.Socket | None,
+        request_type: ZMQRequestType,
+        response_type: ZMQRequestType,
+        body: dict[str, Any],
+    ) -> ZMQMessage:
+        """Send one controller request and validate its response type."""
+        assert socket is not None
+        request_msg = ZMQMessage.create(
+            request_type=request_type,  # type: ignore[arg-type]
+            sender_id=self.client_id,
+            receiver_id=self._controller.id,
+            body=body,
+        )
+        await socket.send_multipart(request_msg.serialize())
+        response_serialized = await socket.recv_multipart(copy=False)
+        response_msg = ZMQMessage.deserialize(response_serialized)
+        logger.debug(f"[{self.client_id}]: Received {response_msg.request_type} from controller {self._controller.id}")
+        if response_msg.request_type != response_type:
+            message = response_msg.body.get("message", "Unknown error")
+            raise RuntimeError(
+                f"[{self.client_id}]: Expected {response_type}, got {response_msg.request_type} "
+                f"from controller {self._controller.id}: {message}"
+            )
+        return response_msg
+
     # ==================== Basic API ====================
     @with_controller_socket
     async def async_get_meta(
@@ -237,11 +264,10 @@ class AsyncTransferQueueClient:
             ... ))
             >>> print(batch_meta.is_ready)  # May be False if some samples not ready
         """
-        assert socket is not None
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.GET_META,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
+        response_msg = await self._request_controller(
+            socket=socket,
+            request_type=ZMQRequestType.GET_META,
+            response_type=ZMQRequestType.GET_META_RESPONSE,
             body={
                 "data_fields": data_fields,
                 "batch_size": batch_size,
@@ -251,21 +277,7 @@ class AsyncTransferQueueClient:
                 "sampling_config": sampling_config,
             },
         )
-
-        await socket.send_multipart(request_msg.serialize())
-        response_serialized = await socket.recv_multipart(copy=False)
-        response_msg = ZMQMessage.deserialize(response_serialized)
-        logger.debug(
-            f"[{self.client_id}]: Client get_meta response: {response_msg} from controller {self._controller.id}"
-        )
-
-        if response_msg.request_type == ZMQRequestType.GET_META_RESPONSE:
-            return response_msg.body["metadata"]
-        else:
-            raise RuntimeError(
-                f"[{self.client_id}]: Failed to get metadata from controller {self._controller.id}: "
-                f"{response_msg.body.get('message', 'Unknown error')}"
-            )
+        return response_msg.body["metadata"]
 
     @with_controller_socket
     async def async_set_custom_meta(
@@ -319,27 +331,14 @@ class AsyncTransferQueueClient:
                 {meta.global_indexes[i]: custom_meta[i] for i in range(len(custom_meta))}
             )
 
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.SET_CUSTOM_META,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
+        await self._request_controller(
+            socket=socket,
+            request_type=ZMQRequestType.SET_CUSTOM_META,
+            response_type=ZMQRequestType.SET_CUSTOM_META_RESPONSE,
             body={
                 "partition_custom_meta": partition_custom_meta,
             },
         )
-
-        await socket.send_multipart(request_msg.serialize())
-        response_serialized = await socket.recv_multipart(copy=False)
-        response_msg = ZMQMessage.deserialize(response_serialized)
-        logger.debug(
-            f"[{self.client_id}]: Client set_custom_meta response: {response_msg} from controller {self._controller.id}"
-        )
-
-        if response_msg.request_type != ZMQRequestType.SET_CUSTOM_META_RESPONSE:
-            raise RuntimeError(
-                f"[{self.client_id}]: Failed to set custom metadata to controller {self._controller.id}: "
-                f"{response_msg.body.get('message', 'Unknown error')}"
-            )
 
     async def async_put(
         self,
@@ -587,19 +586,12 @@ class AsyncTransferQueueClient:
         Raises:
             RuntimeError: If the controller returns an unexpected response
         """
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.MARK_CLEARING,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
+        await self._request_controller(
+            socket=socket,
+            request_type=ZMQRequestType.MARK_CLEARING,
+            response_type=ZMQRequestType.MARK_CLEARING_RESPONSE,
             body={"global_indexes": metadata.global_indexes, "partition_ids": metadata.partition_ids},
         )
-
-        await socket.send_multipart(request_msg.serialize())
-        response_serialized = await socket.recv_multipart(copy=False)
-        response_msg = ZMQMessage.deserialize(response_serialized)
-
-        if response_msg.request_type != ZMQRequestType.MARK_CLEARING_RESPONSE:
-            raise RuntimeError("Failed to mark samples as clearing in controller.")
 
     @with_controller_socket
     async def _clear_meta_in_controller(self, metadata: BatchMeta, socket=None):
@@ -613,19 +605,12 @@ class AsyncTransferQueueClient:
             RuntimeError: If clear operation fails
         """
 
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.CLEAR_META,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
+        await self._request_controller(
+            socket=socket,
+            request_type=ZMQRequestType.CLEAR_META,
+            response_type=ZMQRequestType.CLEAR_META_RESPONSE,
             body={"global_indexes": metadata.global_indexes, "partition_ids": metadata.partition_ids},
         )
-
-        await socket.send_multipart(request_msg.serialize())
-        response_serialized = await socket.recv_multipart(copy=False)
-        response_msg = ZMQMessage.deserialize(response_serialized)
-
-        if response_msg.request_type != ZMQRequestType.CLEAR_META_RESPONSE:
-            raise RuntimeError("Failed to clear samples metadata in controller.")
 
     @with_controller_socket
     async def _get_partition_meta(self, partition_id: str, socket=None) -> BatchMeta:
@@ -641,20 +626,12 @@ class AsyncTransferQueueClient:
         Raises:
             RuntimeError: If controller returns error response
         """
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.GET_PARTITION_META,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
+        response_msg = await self._request_controller(
+            socket=socket,
+            request_type=ZMQRequestType.GET_PARTITION_META,
+            response_type=ZMQRequestType.GET_PARTITION_META_RESPONSE,
             body={"partition_id": partition_id},
         )
-
-        await socket.send_multipart(request_msg.serialize())
-        response_serialized = await socket.recv_multipart(copy=False)
-        response_msg = ZMQMessage.deserialize(response_serialized)
-
-        if response_msg.request_type != ZMQRequestType.GET_PARTITION_META_RESPONSE:
-            raise RuntimeError("Failed to get metadata for clear operation.")
-
         return response_msg.body["metadata"]
 
     @with_controller_socket
@@ -669,19 +646,12 @@ class AsyncTransferQueueClient:
             RuntimeError: If clear operation fails
         """
 
-        request_msg = ZMQMessage.create(
+        await self._request_controller(
+            socket=socket,
             request_type=ZMQRequestType.CLEAR_PARTITION,
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
+            response_type=ZMQRequestType.CLEAR_PARTITION_RESPONSE,
             body={"partition_id": partition_id},
         )
-
-        await socket.send_multipart(request_msg.serialize())
-        response_serialized = await socket.recv_multipart(copy=False)
-        response_msg = ZMQMessage.deserialize(response_serialized)
-
-        if response_msg.request_type != ZMQRequestType.CLEAR_PARTITION_RESPONSE:
-            raise RuntimeError(f"Failed to clear partition {partition_id} in controller.")
 
     # ==================== Status Query API ====================
     @with_controller_socket
@@ -715,35 +685,19 @@ class AsyncTransferQueueClient:
             >>> print(f"Global index: {global_index}, Consumption status: {consumption_status}")
         """
 
-        assert socket is not None
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.GET_CONSUMPTION,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body={
-                "partition_id": partition_id,
-                "task_name": task_name,
-            },
-        )
-
         try:
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}]: Client get consumption response: {response_msg} "
-                f"from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.GET_CONSUMPTION,
+                response_type=ZMQRequestType.CONSUMPTION_RESPONSE,
+                body={
+                    "partition_id": partition_id,
+                    "task_name": task_name,
+                },
             )
-
-            if response_msg.request_type == ZMQRequestType.CONSUMPTION_RESPONSE:
-                global_index = response_msg.body.get("global_index")
-                consumption_status = response_msg.body.get("consumption_status")
-                return global_index, consumption_status
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to get consumption status from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+            global_index = response_msg.body.get("global_index")
+            consumption_status = response_msg.body.get("consumption_status")
+            return global_index, consumption_status
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in get_consumption_status: {str(e)}") from e
 
@@ -777,35 +731,19 @@ class AsyncTransferQueueClient:
             ... ))
             >>> print(f"Global index: {global_index}, Production status: {production_status}")
         """
-        assert socket is not None
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.GET_PRODUCTION,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body={
-                "partition_id": partition_id,
-                "data_fields": data_fields,
-            },
-        )
-
         try:
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}]: Client get production response: {response_msg} "
-                f"from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.GET_PRODUCTION,
+                response_type=ZMQRequestType.PRODUCTION_RESPONSE,
+                body={
+                    "partition_id": partition_id,
+                    "data_fields": data_fields,
+                },
             )
-
-            if response_msg.request_type == ZMQRequestType.PRODUCTION_RESPONSE:
-                global_index = response_msg.body.get("global_index")
-                production_status = response_msg.body.get("production_status")
-                return global_index, production_status
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to get production status from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+            global_index = response_msg.body.get("global_index")
+            production_status = response_msg.body.get("production_status")
+            return global_index, production_status
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in get_data_production_status: {str(e)}") from e
 
@@ -910,34 +848,20 @@ class AsyncTransferQueueClient:
             ... ))
             >>> print(f"Reset successful: {success}")
         """
-        assert socket is not None
         body = {"partition_id": partition_id}
         if task_name is not None:
             body["task_name"] = task_name
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.RESET_CONSUMPTION,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body=body,
-        )
         try:
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}]: Client reset consumption response: {response_msg} "
-                f"from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.RESET_CONSUMPTION,
+                response_type=ZMQRequestType.RESET_CONSUMPTION_RESPONSE,
+                body=body,
             )
-            if response_msg.request_type == ZMQRequestType.RESET_CONSUMPTION_RESPONSE:
-                success = response_msg.body.get("success", False)
-                if not success:
-                    logger.warning(f"[{self.client_id}]: Reset consumption failed: {response_msg.body.get('message')}")
-                return success
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to reset consumption from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+            success = response_msg.body.get("success", False)
+            if not success:
+                logger.warning(f"[{self.client_id}]: Reset consumption failed: {response_msg.body.get('message')}")
+            return success
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in reset_consumption: {str(e)}") from e
 
@@ -958,31 +882,14 @@ class AsyncTransferQueueClient:
             >>> partition_ids = asyncio.run(client.get_partition_list())
             >>> print(f"Available partitions: {partition_ids}")
         """
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.GET_LIST_PARTITIONS,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body={},
-        )
-
         try:
-            assert socket is not None
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}]: Client get partition list response: {response_msg} "
-                f"from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.GET_LIST_PARTITIONS,
+                response_type=ZMQRequestType.LIST_PARTITIONS_RESPONSE,
+                body={},
             )
-
-            if response_msg.request_type == ZMQRequestType.LIST_PARTITIONS_RESPONSE:
-                partition_ids = response_msg.body.get("partition_ids", [])
-                return partition_ids
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to get partition list from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+            return response_msg.body.get("partition_ids", [])
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in get_partition_list: {str(e)}") from e
 
@@ -1020,33 +927,18 @@ class AsyncTransferQueueClient:
         else:
             raise TypeError("Only string or list of strings are allowed as `keys`.")
 
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.KV_RETRIEVE_META,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body={
-                "keys": keys,
-                "partition_id": partition_id,
-                "create": create,
-            },
-        )
-
         try:
-            assert socket is not None, "Socket must be initialized before use"
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}] Received KV_RETRIEVE_META response: {response_msg} "
-                f"from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.KV_RETRIEVE_META,
+                response_type=ZMQRequestType.KV_RETRIEVE_META_RESPONSE,
+                body={
+                    "keys": keys,
+                    "partition_id": partition_id,
+                    "create": create,
+                },
             )
-
-            if response_msg.request_type == ZMQRequestType.KV_RETRIEVE_META_RESPONSE:
-                return response_msg.body.get("metadata", BatchMeta.empty())
-
-            raise RuntimeError(
-                f"[{self.client_id}] Failed to retrieve metadata {response_msg.body.get('message', 'Unknown error')}"
-            )
+            return response_msg.body.get("metadata", BatchMeta.empty())
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}] Failed in async_kv_retrieve_meta: {e}") from e
 
@@ -1083,33 +975,17 @@ class AsyncTransferQueueClient:
         else:
             raise TypeError("Only int or list of int are allowed as `global_indexes`.")
 
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.KV_RETRIEVE_KEYS,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body={"global_indexes": global_indexes, "partition_id": partition_id},
-        )
-
         try:
-            assert socket is not None
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}]: Client get kv_retrieve_indexes response: {response_msg} "
-                f"from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.KV_RETRIEVE_KEYS,
+                response_type=ZMQRequestType.KV_RETRIEVE_KEYS_RESPONSE,
+                body={"global_indexes": global_indexes, "partition_id": partition_id},
             )
-
-            if response_msg.request_type == ZMQRequestType.KV_RETRIEVE_KEYS_RESPONSE:
-                keys = response_msg.body.get("keys", [])
-                if len(keys) != len(global_indexes):
-                    raise RuntimeError("Some global_indexes have no corresponding keys!")
-                return keys
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to retrieve indexes from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+            keys = response_msg.body.get("keys", [])
+            if len(keys) != len(global_indexes):
+                raise RuntimeError("Some global_indexes have no corresponding keys!")
+            return keys
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in kv_retrieve_indexes: {str(e)}") from e
 
@@ -1142,32 +1018,14 @@ class AsyncTransferQueueClient:
             }
         """
 
-        request_msg = ZMQMessage.create(
-            request_type=ZMQRequestType.KV_LIST,  # type: ignore[arg-type]
-            sender_id=self.client_id,
-            receiver_id=self._controller.id,
-            body={
-                "partition_id": partition_id,
-            },
-        )
-
         try:
-            assert socket is not None
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            logger.debug(
-                f"[{self.client_id}]: Client get kv_list response: {response_msg} from controller {self._controller.id}"
+            response_msg = await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.KV_LIST,
+                response_type=ZMQRequestType.KV_LIST_RESPONSE,
+                body={"partition_id": partition_id},
             )
-
-            if response_msg.request_type == ZMQRequestType.KV_LIST_RESPONSE:
-                partition_info = response_msg.body.get("partition_info", {})
-                return partition_info
-            else:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Failed to list keys from controller {self._controller.id}: "
-                    f"{response_msg.body.get('message', 'Unknown error')}"
-                )
+            return response_msg.body.get("partition_info", {})
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in kv_list: {str(e)}") from e
 
@@ -1248,21 +1106,12 @@ class AsyncTransferQueueClient:
             RuntimeError: If the RPC fails or an unexpected response is received.
         """
         try:
-            assert socket is not None
-            request_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT,  # type: ignore[arg-type]
-                sender_id=self.client_id,
-                receiver_id=self._controller.id,
+            await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT,
+                response_type=ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT_RESPONSE,
                 body={"path": path},
             )
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            if response_msg.request_type != ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT_RESPONSE:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Unexpected response type {response_msg.request_type} "
-                    f"from controller during checkpoint dump"
-                )
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in save_controller_checkpoint: {str(e)}") from e
 
@@ -1288,21 +1137,12 @@ class AsyncTransferQueueClient:
             RuntimeError: If the RPC fails or an unexpected response is received.
         """
         try:
-            assert socket is not None
-            request_msg = ZMQMessage.create(
-                request_type=ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT,  # type: ignore[arg-type]
-                sender_id=self.client_id,
-                receiver_id=self._controller.id,
+            await self._request_controller(
+                socket=socket,
+                request_type=ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT,
+                response_type=ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT_RESPONSE,
                 body={"path": path},
             )
-            await socket.send_multipart(request_msg.serialize())
-            response_serialized = await socket.recv_multipart(copy=False)
-            response_msg = ZMQMessage.deserialize(response_serialized)
-            if response_msg.request_type != ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT_RESPONSE:
-                raise RuntimeError(
-                    f"[{self.client_id}]: Unexpected response type {response_msg.request_type} "
-                    f"from controller during checkpoint restore"
-                )
         except Exception as e:
             raise RuntimeError(f"[{self.client_id}]: Error in load_controller_checkpoint: {str(e)}") from e
 
@@ -1395,18 +1235,19 @@ class TransferQueueClient(AsyncTransferQueueClient):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    def _run_coroutine(self, coro):
+        """Run a coroutine on the client's background event loop."""
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
+
     def _bind_sync_methods(
         self,
     ):
         """Convert and bind synchronous methods."""
 
-        def _run(coro):
-            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-            return future.result()
-
         def _make_sync(async_method):
             def wrapper(*args, **kwargs):
-                return _run(async_method(*args, **kwargs))
+                return self._run_coroutine(async_method(*args, **kwargs))
 
             return wrapper
 

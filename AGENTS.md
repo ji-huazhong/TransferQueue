@@ -14,12 +14,10 @@ and tests without reconstructing hidden control flow.
    and scheduling; storage managers, clients, and backends move payloads.
 4. No over-encapsulation: add an abstraction only for real nontrivial reuse, an
    important invariant, or an existing sampler/storage interface.
-5. Do NOT remove public APIs, backend support, async/distributed behavior,
-   metadata semantics, defaults, or observability in the name of simplicity.
-6. Prioritize behavior reachable through supported APIs, configurations,
+5. Prioritize behavior reachable through supported APIs, configurations,
    backends, tutorials, or tests; do not fix states the system cannot enter.
 
-Details: `.claude/skills/simplicity-first` (invoke before any code change).
+Details: `.codex/skills/simplicity-first` (invoke before any code change).
 
 ## Comments
 
