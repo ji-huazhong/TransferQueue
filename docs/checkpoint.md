@@ -9,7 +9,7 @@ TransferQueue provides `tq.save_checkpoint` and `tq.load_checkpoint` to persist 
 A checkpoint captures two components:
 
 - **Controller state** — all partition metadata, the global index manager, and sampler state.
-- **Storage data** — the tensor and non-tensor field data held by each `SimpleStorageUnit`.
+- **Storage data** — the tensor and non-tensor field data held by each `SimpleStorageUnit`, in memory or on SSD.
 
 ## Quick Start
 
@@ -45,7 +45,7 @@ def save_checkpoint(
 | Parameter | Description |
 |-----------|-------------|
 | `checkpoint_dir` | Directory to write the checkpoint. Created if it does not exist. If a checkpoint already exists at this path it is replaced (best-effort; see [Known Limitations §3](#3-replacing-an-existing-checkpoint-is-not-fully-atomic)). |
-| `include_storage` | Whether to save storage unit data. For `SimpleStorage` (in-memory), this is forced to `True` regardless of the value passed — skipping storage would cause complete data loss on restart. For persistent external backends, `False` is valid. |
+| `include_storage` | Whether to save storage unit data. For `SimpleStorage`, this is forced to `True` regardless of the value passed — both its memory and SSD working data are tied to the running storage units. For persistent external backends, `False` is valid. |
 | `metadata` | Optional user-defined key-value pairs written into `metadata.json`. Useful for recording step number, timestamp, etc. |
 
 **Raises**: `RuntimeError` if `tq.init()` has not been called, or if any write step fails.

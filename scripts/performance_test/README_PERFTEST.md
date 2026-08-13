@@ -56,7 +56,30 @@ backend:
   SimpleStorage:
     total_storage_size: 100000
     num_data_storage_units: 16
+    offload:
+      enabled: true
+      backend: mooncake
+      file_storage_path: /local_nvme/transfer_queue
+      memory_cache_size_bytes: 67108864
+      mooncake:
+        global_segment_size: 536870912
+        local_buffer_size: 33554432
+        offload_buffer_size_bytes: 67108864
+        max_object_size_bytes: 16711680
+        get_window_size_bytes: 67108864
+        lease_ttl_ms: 500
 ```
+
+Set `offload.enabled: false` for the in-memory baseline. Run both configurations
+with the same data shape and storage-unit count when comparing throughput.
+The `backend.MooncakeStore` block supplies the master/metadata addresses and
+transport for this combined path. Use
+`simple_storage_mooncake_benchmark.py --offload-backend mooncake` when measuring
+the combined path: a normal PUT result is a foreground Mooncake DRAM
+acknowledgement and must not be reported as SSD throughput without drain and
+eviction proof. Repeat with `--offload-backend local_file` on the same host and
+data shape for the SQLite-indexed direct-file reference. The benchmark does
+not issue an `fsync` barrier or drop the OS page cache.
 
 ### Yuanrong Configuration
 

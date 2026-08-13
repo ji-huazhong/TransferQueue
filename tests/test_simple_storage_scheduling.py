@@ -114,4 +114,176 @@ def test_simple_storage_initialization_forwards_required_node_resource(monkeypat
     handles = simple_storage_bootstrap.initialize_simple_storage(conf)
 
     get_strategies.assert_called_once_with(1, required_node_resource="storage_pool")
+    storage_unit.options.return_value.remote.assert_called_once_with(
+        storage_unit_size=None,
+        offload_path=None,
+        offload_cache_size_bytes=64 * 1024 * 1024,
+        offload_backend="local_file",
+        mooncake_config=None,
+    )
     assert handles == {"TransferQueueStorageUnit#0": storage_handle}
+
+
+def test_simple_storage_initialization_forwards_ssd_offload(monkeypatch, tmp_path):
+    strategy = MagicMock(node_id=_NODE_A)
+    storage_unit = MagicMock()
+    storage_handle = MagicMock()
+    storage_unit.options.return_value.remote.return_value = storage_handle
+
+    monkeypatch.setattr(
+        simple_storage_bootstrap,
+        "get_node_round_robin_scheduling_strategies",
+        MagicMock(return_value=[strategy]),
+    )
+    monkeypatch.setattr(simple_storage_bootstrap, "SimpleStorageUnit", storage_unit)
+    monkeypatch.setattr(simple_storage_bootstrap, "process_zmq_server_info", lambda _: {})
+
+    conf = OmegaConf.create(
+        {
+            "backend": {
+                "storage_backend": "SimpleStorage",
+                "SimpleStorage": {
+                    "num_data_storage_units": 1,
+                    "offload": {
+                        "enabled": True,
+                        "backend": "local_file",
+                        "file_storage_path": str(tmp_path),
+                        "memory_cache_size_bytes": 8 * 1024 * 1024,
+                    },
+                },
+            }
+        }
+    )
+
+    simple_storage_bootstrap.initialize_simple_storage(conf)
+
+    storage_unit.options.return_value.remote.assert_called_once_with(
+        storage_unit_size=None,
+        offload_path=str(tmp_path),
+        offload_cache_size_bytes=8 * 1024 * 1024,
+        offload_backend="local_file",
+        mooncake_config=None,
+    )
+
+
+def test_simple_storage_initialization_embeds_mooncake_offload(monkeypatch, tmp_path):
+    strategy = MagicMock(node_id=_NODE_A)
+    storage_unit = MagicMock()
+    storage_handle = MagicMock()
+    storage_unit.options.return_value.remote.return_value = storage_handle
+    master = MagicMock()
+    initialize_mooncake = MagicMock(return_value=master)
+
+    monkeypatch.setattr(
+        simple_storage_bootstrap,
+        "get_node_round_robin_scheduling_strategies",
+        MagicMock(return_value=[strategy]),
+    )
+    monkeypatch.setattr(simple_storage_bootstrap, "SimpleStorageUnit", storage_unit)
+    monkeypatch.setattr(simple_storage_bootstrap, "process_zmq_server_info", lambda _: {})
+    monkeypatch.setattr(simple_storage_bootstrap, "initialize_mooncake_storage", initialize_mooncake)
+
+    conf = OmegaConf.create(
+        {
+            "backend": {
+                "storage_backend": "SimpleStorage",
+                "SimpleStorage": {
+                    "num_data_storage_units": 1,
+                    "offload": {
+                        "enabled": True,
+                        "backend": "mooncake",
+                        "file_storage_path": str(tmp_path),
+                        "memory_cache_size_bytes": 1024,
+                        "mooncake": {
+                            "global_segment_size": 4096,
+                            "local_buffer_size": 2048,
+                            "offload_buffer_size_bytes": 1024,
+                            "lease_ttl_ms": 250,
+                        },
+                    },
+                },
+                "MooncakeStore": {
+                    "auto_init": True,
+                    "metadata_server": "P2PHANDSHAKE",
+                    "master_server_address": "127.0.0.1:50051",
+                    "local_hostname": "127.0.0.1",
+                    "protocol": "tcp",
+                    "device_name": "",
+                    "offload": {"enabled": False},
+                },
+            }
+        }
+    )
+
+    resources = simple_storage_bootstrap.initialize_simple_storage(conf)
+
+    master_conf = initialize_mooncake.call_args.args[0]
+    assert master_conf.backend.MooncakeStore.offload.enabled is True
+    assert master_conf.backend.MooncakeStore.offload.lease_ttl_ms == 250
+    actor_config = storage_unit.options.return_value.remote.call_args.kwargs["mooncake_config"]
+    assert actor_config["global_segment_size"] == 4096
+    assert actor_config["local_buffer_size"] == 2048
+    assert actor_config["offload"]["file_storage_path"] == str(tmp_path)
+    assert actor_config["hard_pin"] is False
+    assert resources.mooncake_master is master
+
+
+def test_simple_storage_offload_requires_path(monkeypatch):
+    conf = OmegaConf.create(
+        {
+            "backend": {
+                "storage_backend": "SimpleStorage",
+                "SimpleStorage": {
+                    "num_data_storage_units": 1,
+                    "offload": {"enabled": True, "file_storage_path": ""},
+                },
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="offload.file_storage_path must be set"):
+        simple_storage_bootstrap.initialize_simple_storage(conf)
+
+
+def test_simple_storage_mooncake_bootstrap_failure_cleans_owned_master(monkeypatch, tmp_path):
+    strategy = MagicMock(node_id=_NODE_A)
+    storage_unit = MagicMock()
+    storage_unit.options.return_value.remote.side_effect = RuntimeError("actor setup failed")
+    master = MagicMock()
+    master.poll.return_value = None
+
+    monkeypatch.setattr(
+        simple_storage_bootstrap,
+        "get_node_round_robin_scheduling_strategies",
+        MagicMock(return_value=[strategy]),
+    )
+    monkeypatch.setattr(simple_storage_bootstrap, "SimpleStorageUnit", storage_unit)
+    monkeypatch.setattr(simple_storage_bootstrap, "initialize_mooncake_storage", MagicMock(return_value=master))
+
+    conf = OmegaConf.create(
+        {
+            "backend": {
+                "storage_backend": "SimpleStorage",
+                "SimpleStorage": {
+                    "num_data_storage_units": 1,
+                    "offload": {
+                        "enabled": True,
+                        "backend": "mooncake",
+                        "file_storage_path": str(tmp_path),
+                    },
+                },
+                "MooncakeStore": {
+                    "auto_init": True,
+                    "metadata_server": "P2PHANDSHAKE",
+                    "master_server_address": "127.0.0.1:50051",
+                    "offload": {"enabled": False},
+                },
+            }
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="actor setup failed"):
+        simple_storage_bootstrap.initialize_simple_storage(conf)
+
+    master.terminate.assert_called_once_with()
+    master.wait.assert_called_once_with(timeout=5)

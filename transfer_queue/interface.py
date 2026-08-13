@@ -239,8 +239,23 @@ def close():
             for key, value in _TQ_STORAGE.items():
                 if key == "SimpleStorage":
                     # only the process that do first-time init can clean the distributed storage
-                    for storage in value.values():
-                        ray.kill(storage)
+                    storage_actors = list(value.values())
+                    try:
+                        ray.get([storage.close.remote() for storage in storage_actors], timeout=10)
+                    except Exception as e:
+                        logger.warning(f"Failed to gracefully close all SimpleStorage actors: {e}")
+                    finally:
+                        for storage in storage_actors:
+                            ray.kill(storage)
+                    mooncake_master = getattr(value, "mooncake_master", None)
+                    if mooncake_master is not None and mooncake_master.poll() is None:
+                        mooncake_master.terminate()
+                        try:
+                            mooncake_master.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            logger.warning("Owned Mooncake master did not terminate in 5s; killing it.")
+                            mooncake_master.kill()
+                            mooncake_master.wait(timeout=5)
                 elif key == "MooncakeStore":
                     check = subprocess.run(["pgrep", "-f", "mooncake_master"], stdout=subprocess.PIPE, text=True)
                     if check.returncode == 0:
@@ -249,17 +264,6 @@ def close():
                             f"TransferQueue will not stop mooncake_master process with PID: {pids}. "
                             f"Consider manually killing the mooncake_master."
                         )
-
-                    # Terminate offload client process if it was started
-                    if isinstance(value, dict):
-                        offload_proc = value.get("offload_client_process")
-                        if offload_proc is not None and offload_proc.poll() is None:
-                            offload_proc.terminate()
-                            try:
-                                offload_proc.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                offload_proc.kill()
-                            logger.info(f"Terminated mooncake_client offload process (PID: {offload_proc.pid}).")
 
                     if _TQ_CLIENT:
                         try:

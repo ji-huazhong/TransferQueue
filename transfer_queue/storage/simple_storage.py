@@ -25,6 +25,12 @@ import psutil
 import ray
 import zmq
 
+from transfer_queue.storage.simple_storage_disk import (
+    _OFFLOAD_CHECKPOINT_FORMAT,
+    DiskStorageUnitData,
+    _storage_batch_items,
+)
+from transfer_queue.storage.simple_storage_mooncake import MooncakeStorageUnitData
 from transfer_queue.utils.common import limit_pytorch_auto_parallel_threads
 from transfer_queue.utils.enum_utils import Role
 from transfer_queue.utils.logging_utils import get_logger
@@ -46,6 +52,12 @@ logger = get_logger(__name__)
 
 TQ_STORAGE_POLLER_TIMEOUT = int(os.environ.get("TQ_STORAGE_POLLER_TIMEOUT", 5))  # in seconds
 TQ_NUM_THREADS = int(os.environ.get("TQ_NUM_THREADS", 8))
+_PHYSICAL_CORES = psutil.cpu_count(logical=False)
+if _PHYSICAL_CORES is not None and TQ_NUM_THREADS > _PHYSICAL_CORES:
+    logger.warning(
+        f"TQ_NUM_THREADS {TQ_NUM_THREADS} exceeds {_PHYSICAL_CORES} physical CPU cores; using {_PHYSICAL_CORES}."
+    )
+    TQ_NUM_THREADS = _PHYSICAL_CORES
 
 
 class StorageUnitData:
@@ -73,6 +85,11 @@ class StorageUnitData:
     def active_key_count(self) -> int:
         """Number of active keys currently stored."""
         return len(self._active_keys)
+
+    @property
+    def disk_usage_bytes(self) -> int:
+        """Bytes used by SSD offload. In-memory storage does not use disk."""
+        return 0
 
     def get_data(self, fields: list[str], global_indexes: list) -> dict[str, list]:
         """Get data by global index keys.
@@ -135,6 +152,60 @@ class StorageUnitData:
                 self.field_data[f].pop(key, None)
         self._active_keys -= set(keys)
 
+    def save_checkpoint(self, path: str, storage_unit_id: str) -> None:
+        """Save the in-memory representation in the original checkpoint format."""
+        state = {
+            "storage_unit_id": storage_unit_id,
+            "storage_unit_size": self.storage_size,
+            "field_data": self.field_data,
+            "active_keys": self._active_keys,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def load_checkpoint(self, path: str) -> tuple[int | None, int, int]:
+        """Replace memory data from an in-memory or streamed SSD checkpoint."""
+        with open(path, "rb") as f:
+            state = pickle.load(f)
+            if state.get("format") != _OFFLOAD_CHECKPOINT_FORMAT:
+                new_field_data = state["field_data"]
+                new_active_keys = state["active_keys"]
+            else:
+                new_field_data: dict[str, dict[int, Any]] = {}
+                new_active_keys: set[int] = set()
+                decoded_batches: dict[int, Any] = {}
+                checkpoint_complete = False
+                while True:
+                    try:
+                        record_type, records = pickle.load(f)
+                    except EOFError:
+                        break
+                    if record_type == "samples":
+                        new_active_keys.update(records)
+                    elif record_type == "batches":
+                        decoded_batches.update(
+                            (batch_id, _storage_batch_items(payload)) for batch_id, payload in records
+                        )
+                    elif record_type == "values":
+                        for global_index, field, batch_id, position in records:
+                            if global_index not in new_active_keys:
+                                raise ValueError(f"Checkpoint field references unknown key {global_index}")
+                            new_field_data.setdefault(field, {})[global_index] = decoded_batches[batch_id][position]
+                    elif record_type == "end":
+                        checkpoint_complete = True
+                        break
+                    else:
+                        raise ValueError(f"Unknown checkpoint record type: {record_type}")
+                if not checkpoint_complete:
+                    raise ValueError("Incomplete SimpleStorage SSD checkpoint")
+
+        self.field_data = new_field_data
+        self._active_keys = new_active_keys
+        return state["storage_unit_size"], len(new_active_keys), len(new_field_data)
+
+    def close(self) -> None:
+        """Match the SSD-backed storage lifecycle API."""
+
 
 @ray.remote(num_cpus=1)
 class SimpleStorageUnit:
@@ -154,17 +225,49 @@ class SimpleStorageUnit:
         zmq_server_info: ZMQ connection information for clients.
     """
 
-    def __init__(self, storage_unit_size: int | None = None):
+    def __init__(
+        self,
+        storage_unit_size: int | None = None,
+        offload_path: str | None = None,
+        offload_cache_size_bytes: int = 64 * 1024 * 1024,
+        offload_backend: str = "local_file",
+        mooncake_config: dict[str, Any] | None = None,
+    ):
         """Initialize a SimpleStorageUnit with the specified size.
 
         Args:
             storage_unit_size: Maximum number of elements that can be stored in this storage unit.
                 If None, the storage unit has unlimited capacity.
+            offload_path: Absolute local SSD directory. When set, payloads leave
+                the Python heap and use the selected offload backend.
+            offload_cache_size_bytes: Per-unit SQLite page cache limit in bytes.
+            offload_backend: ``local_file`` or ``mooncake`` payload storage.
+            mooncake_config: Mooncake connection and bounded-memory settings.
         """
         self.storage_unit_id = f"TQ_STORAGE_UNIT_{uuid4().hex[:8]}"
         self.storage_unit_size = storage_unit_size
 
-        self.storage_data = StorageUnitData(self.storage_unit_size)
+        if offload_path is None:
+            self.storage_data = StorageUnitData(self.storage_unit_size)
+        elif offload_backend == "local_file":
+            self.storage_data = DiskStorageUnitData(
+                self.storage_unit_size,
+                offload_path,
+                self.storage_unit_id,
+                offload_cache_size_bytes,
+            )
+        elif offload_backend == "mooncake":
+            if mooncake_config is None:
+                raise ValueError("SimpleStorage Mooncake offload requires mooncake_config")
+            self.storage_data = MooncakeStorageUnitData(
+                self.storage_unit_size,
+                offload_path,
+                self.storage_unit_id,
+                offload_cache_size_bytes,
+                mooncake_config,
+            )
+        else:
+            raise ValueError(f"Unsupported SimpleStorage offload backend: {offload_backend}")
 
         # Internal communication address for proxy and workers
         self._inproc_addr = f"inproc://simple_storage_workers_{self.storage_unit_id}"
@@ -192,6 +295,7 @@ class SimpleStorageUnit:
             self.proxy_thread,
             self.zmq_context,
             self.put_get_socket,
+            self.storage_data,
         )
 
     def _init_zmq_socket(self) -> None:
@@ -281,6 +385,8 @@ class SimpleStorageUnit:
                 logger.info(f"[{self.storage_unit_id}]: worker stopped gracefully (Context Terminated)")
                 break
             except Exception as e:
+                if self._shutdown_event.is_set():
+                    break
                 logger.warning(f"[{self.storage_unit_id}]: worker poll error: {e}")
                 continue
 
@@ -517,6 +623,7 @@ class SimpleStorageUnit:
             "capacity": self.storage_unit_size,
             "active_keys": self.storage_data.active_key_count,
             "process_rss_bytes": process_rss,
+            "offload_disk_bytes": self.storage_data.disk_usage_bytes,
         }
 
         # Include per-operation stats if Prometheus metrics are enabled
@@ -562,14 +669,7 @@ class SimpleStorageUnit:
         """
         path = data_parts.body["path"]
         try:
-            state = {
-                "storage_unit_id": self.storage_unit_id,
-                "storage_unit_size": self.storage_unit_size,
-                "field_data": self.storage_data.field_data,
-                "active_keys": self.storage_data._active_keys,
-            }
-            with open(path, "wb") as f:
-                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self.storage_data.save_checkpoint(path, self.storage_unit_id)
             logger.info(f"[{self.storage_unit_id}]: saved checkpoint to {path}")
             return ZMQMessage.create(
                 request_type=ZMQRequestType.SAVE_STORAGE_CHECKPOINT_RESPONSE,  # type: ignore[arg-type]
@@ -600,28 +700,24 @@ class SimpleStorageUnit:
         """
         path = data_parts.body["path"]
         try:
-            with open(path, "rb") as f:
-                data = pickle.load(f)
+            prior_key_count = self.storage_data.active_key_count
+            checkpoint_size, active_key_count, field_count = self.storage_data.load_checkpoint(path)
 
-            if data["storage_unit_size"] != self.storage_unit_size:
+            if checkpoint_size != self.storage_unit_size:
                 logger.warning(
                     f"[{self.storage_unit_id}]: storage_unit_size mismatch — "
-                    f"checkpoint={data['storage_unit_size']}, current={self.storage_unit_size}"
+                    f"checkpoint={checkpoint_size}, current={self.storage_unit_size}"
                 )
 
-            if self.storage_data._active_keys:
+            if prior_key_count:
                 logger.warning(
-                    f"[{self.storage_unit_id}]: overwriting {len(self.storage_data._active_keys)} "
+                    f"[{self.storage_unit_id}]: overwrote {prior_key_count} "
                     f"existing keys with checkpoint data from {path}"
                 )
-            self.storage_data.field_data.clear()
-            self.storage_data._active_keys.clear()
-            self.storage_data.field_data = data["field_data"]
-            self.storage_data._active_keys = data["active_keys"]
 
             logger.info(
                 f"[{self.storage_unit_id}]: loaded checkpoint from {path} — "
-                f"{len(data['active_keys'])} keys, {len(data['field_data'])} fields"
+                f"{active_key_count} keys, {field_count} fields"
             )
             return ZMQMessage.create(
                 request_type=ZMQRequestType.LOAD_STORAGE_CHECKPOINT_RESPONSE,  # type: ignore[arg-type]
@@ -676,6 +772,7 @@ class SimpleStorageUnit:
         proxy_thread: Thread | None,
         zmq_context: zmq.Context | None,
         put_get_socket: zmq.Socket | None,
+        storage_data: StorageUnitData | DiskStorageUnitData | MooncakeStorageUnitData,
     ) -> None:
         """Clean up resources on garbage collection."""
         logger.info("Shutting down SimpleStorageUnit resources...")
@@ -687,9 +784,10 @@ class SimpleStorageUnit:
         if put_get_socket:
             put_get_socket.close(linger=0)
 
-        # Terminate ZMQ context to unblock proxy and workers
+        # Close every socket before terminating; Context.term() waits forever
+        # while the worker's thread-local socket remains open.
         if zmq_context:
-            zmq_context.term()
+            zmq_context.destroy(linger=0)
 
         # Wait for threads to finish (with timeout)
         if worker_thread and worker_thread.is_alive():
@@ -697,7 +795,13 @@ class SimpleStorageUnit:
         if proxy_thread and proxy_thread.is_alive():
             proxy_thread.join(timeout=5)
 
+        storage_data.close()
+
         logger.info("SimpleStorageUnit resources shutdown complete.")
+
+    def close(self) -> None:
+        """Gracefully stop worker resources and delete ephemeral offload files."""
+        self._finalizer()
 
     def start_metrics(self, port: int = 0) -> str:
         """Initialize and start the Prometheus metrics exporter for this storage unit.

@@ -135,6 +135,7 @@ Steps:
 | `tq_storage_active_keys_total` | Gauge | `storage_unit_id` | Active keys in storage |
 | `tq_storage_utilization_ratio` | Gauge | `storage_unit_id` | Utilization (active/capacity) |
 | `tq_storage_memory_rss_bytes` | Gauge | `storage_unit_id` | Storage process RSS memory |
+| `tq_storage_offload_disk_bytes` | Gauge | `storage_unit_id` | Bytes below the SimpleStorage actor's SSD directory, including its SQLite index and Mooncake or local-file payloads (zero in memory mode) |
 | `tq_storage_request_ops` | Gauge | `storage_unit_id`, `op_type` | Total requests processed by storage unit |
 | `tq_storage_request_latency_avg` | Gauge | `storage_unit_id`, `op_type` | Average request latency (seconds) |
 | `tq_storage_request_latency_p50` | Gauge | `storage_unit_id`, `op_type` | P50 request latency (seconds) |

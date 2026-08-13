@@ -93,6 +93,7 @@ class TestMetricDefinitions:
             "tq_storage_active_keys_total",
             "tq_storage_utilization_ratio",
             "tq_storage_memory_rss_bytes",
+            "tq_storage_offload_disk_bytes",
         ]
 
         registered = {m.name for m in exporter.registry.collect()}
@@ -229,6 +230,7 @@ class TestStorageMetricsCollection:
                 "capacity": 1000,
                 "active_keys": 250,
                 "process_rss_bytes": 512 * 1024 * 1024,
+                "offload_disk_bytes": 8 * 1024 * 1024 * 1024,
             }
         )
 
@@ -238,6 +240,7 @@ class TestStorageMetricsCollection:
         assert exporter.storage_active_keys.labels(storage_unit_id="SU_001")._value.get() == 250
         assert exporter.storage_utilization.labels(storage_unit_id="SU_001")._value.get() == 0.25
         assert exporter.storage_memory_rss.labels(storage_unit_id="SU_001")._value.get() == 512 * 1024 * 1024
+        assert exporter.storage_offload_disk.labels(storage_unit_id="SU_001")._value.get() == 8 * 1024 * 1024 * 1024
 
     def test_storage_metrics_handles_query_failure(self):
         """If a storage unit query fails, other units should still be collected."""

@@ -243,11 +243,20 @@ def sync_stage(flag_to_create, flag_to_wait):
 
 
 class TQBandwidthTester:
-    def __init__(self, target_ip=None, storage_units=8, enable_profile=False):
+    def __init__(
+        self,
+        target_ip=None,
+        storage_units=8,
+        enable_profile=False,
+        offload_path=None,
+        offload_cache_size_bytes=64 * 1024 * 1024,
+    ):
         self.target_ip = target_ip
         self.num_storage_units = storage_units
         self.remote_mode = target_ip is not None
         self.enable_profile = enable_profile
+        self.offload_path = offload_path
+        self.offload_cache_size_bytes = offload_cache_size_bytes
         self.data_system_client = None
         self.tq_config = None
         self.data_system_controller = None
@@ -277,7 +286,11 @@ class TQBandwidthTester:
                     num_cpus=1,
                     resources={f"node:{self.target_ip}": 0.001},
                     runtime_env={"env_vars": {"OMP_NUM_THREADS": "2"}},
-                ).remote(storage_unit_size=math.ceil(total_storage_size / self.num_storage_units))
+                ).remote(
+                    storage_unit_size=math.ceil(total_storage_size / self.num_storage_units),
+                    offload_path=self.offload_path,
+                    offload_cache_size_bytes=self.offload_cache_size_bytes,
+                )
         else:
             # Local Mode: Use placement group
             self.storage_placement_group = get_placement_group(self.num_storage_units, num_cpus_per_actor=2)
@@ -286,7 +299,11 @@ class TQBandwidthTester:
                     placement_group=self.storage_placement_group,
                     placement_group_bundle_index=rank,
                     runtime_env={"env_vars": {"OMP_NUM_THREADS": "2"}},
-                ).remote(storage_unit_size=math.ceil(total_storage_size / self.num_storage_units))
+                ).remote(
+                    storage_unit_size=math.ceil(total_storage_size / self.num_storage_units),
+                    offload_path=self.offload_path,
+                    offload_cache_size_bytes=self.offload_cache_size_bytes,
+                )
 
         # Controller Init
         self.data_system_controller = TransferQueueController.remote()
@@ -305,9 +322,7 @@ class TQBandwidthTester:
         self.data_system_client = TransferQueueClient(
             client_id="Trainer", controller_info=self.data_system_controller_info
         )
-        self.data_system_client.initialize_storage_manager(
-            manager_type="AsyncSimpleStorageManager", config=self.tq_config
-        )
+        self.data_system_client.initialize_storage_manager(manager_type="SimpleStorage", config=self.tq_config)
 
         return self.data_system_client
 
@@ -322,8 +337,14 @@ class TQBandwidthTester:
 
         # 2. Kill Storage Unit Actors
         if self.data_system_storage_units:
-            for unit in self.data_system_storage_units.values():
-                ray.kill(unit)
+            storage_units = list(self.data_system_storage_units.values())
+            try:
+                ray.get([unit.close.remote() for unit in storage_units], timeout=10)
+            except Exception as e:
+                logger.warning(f"Failed to gracefully close all storage units: {e}")
+            finally:
+                for unit in storage_units:
+                    ray.kill(unit)
             self.data_system_storage_units = {}
 
         # 3. Remove Placement Group (release reserved CPU/resource bundles)
@@ -426,6 +447,13 @@ def main():
     parser.add_argument("--rounds", type=int, default=20, help="Test rounds per config (default: 20)")
     parser.add_argument("--shards", type=int, default=8, help="Number of storage units (default: 8)")
     parser.add_argument("--profile", action="store_true", help="Enable profile sync (requires external profiler)")
+    parser.add_argument("--offload-path", type=str, default=None, help="Absolute local NVMe path for SSD mode")
+    parser.add_argument(
+        "--offload-cache-size-bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+        help="SQLite page cache per storage unit",
+    )
 
     args = parser.parse_args()
 
@@ -438,7 +466,13 @@ def main():
     logger.info(f"Ray initialized. Target: {target_address}")
 
     # Create tester
-    tester = TQBandwidthTester(target_ip=args.ip, storage_units=args.shards, enable_profile=args.profile)
+    tester = TQBandwidthTester(
+        target_ip=args.ip,
+        storage_units=args.shards,
+        enable_profile=args.profile,
+        offload_path=os.path.abspath(args.offload_path) if args.offload_path else None,
+        offload_cache_size_bytes=args.offload_cache_size_bytes,
+    )
 
     # Run tests
     run_list = [args.config] if args.config else list(CONFIG_MAP.keys())
@@ -461,6 +495,7 @@ def main():
     except Exception as e:
         logger.exception(f"❌ Critical error: {e}")
     finally:
+        tester.cleanup()
         if ray.is_initialized():
             ray.shutdown()
 

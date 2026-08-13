@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, cast
@@ -114,7 +115,21 @@ class MooncakeStoreClient(StorageKVClient):
         # When offload is enabled, hard_pin must be disabled so that objects can be evicted
         # and offloaded to SSD. Hard-pinned objects are never evicted by Mooncake.
         offload_conf = config.get("offload", {})
-        offload_enabled = offload_conf.get("enabled", False) if isinstance(offload_conf, dict) else False
+        offload_enabled = bool(offload_conf.get("enabled", False))
+        offload_path = str(offload_conf.get("file_storage_path", "")).strip() if offload_enabled else ""
+        if offload_enabled:
+            if not offload_path:
+                raise ValueError("MooncakeStore offload.file_storage_path must be set when offload is enabled")
+            offload_buffer_size = int(offload_conf.get("local_buffer_size_bytes", 268435456))
+            if offload_buffer_size <= 0:
+                raise ValueError("MooncakeStore offload.local_buffer_size_bytes must be positive")
+            os.makedirs(offload_path, exist_ok=True)
+            os.environ["MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES"] = str(offload_buffer_size)
+            os.environ["MOONCAKE_OFFLOAD_USE_URING"] = "1" if offload_conf.get("use_uring", False) else "0"
+            heartbeat_interval = int(offload_conf.get("heartbeat_interval_seconds", 2))
+            if heartbeat_interval <= 0:
+                raise ValueError("MooncakeStore offload.heartbeat_interval_seconds must be positive")
+            os.environ["MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS"] = str(heartbeat_interval)
         hard_pin = config.get("hard_pin", None)
         if hard_pin is None:
             # Auto-manage: disable hard_pin when offload is enabled
@@ -130,6 +145,9 @@ class MooncakeStoreClient(StorageKVClient):
             self.protocol,
             self.device_name,
             self.master_server_address,
+            None,
+            offload_enabled,
+            offload_path,
         )
         if ret != 0:
             raise RuntimeError(f"Mooncake store setup failed with error code: {ret}")

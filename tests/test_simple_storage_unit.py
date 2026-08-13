@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import pickle
+import sqlite3
 import time
 
 import pytest
@@ -21,7 +24,7 @@ import tensordict
 import torch
 import zmq
 
-from transfer_queue.storage.simple_storage import SimpleStorageUnit
+from transfer_queue.storage.simple_storage import DiskStorageUnitData, SimpleStorageUnit, StorageUnitData
 from transfer_queue.utils.zmq_utils import ZMQMessage, ZMQRequestType, create_zmq_socket
 
 
@@ -60,6 +63,15 @@ class MockStorageClient:
             request_type=ZMQRequestType.CLEAR_DATA,
             sender_id=f"mock_client_{client_id}",
             body={"global_indexes": global_indexes},
+        )
+        self.socket.send_multipart(msg.serialize())
+        return ZMQMessage.deserialize(self.socket.recv_multipart(copy=False))
+
+    def send_get_metrics(self, client_id):
+        msg = ZMQMessage.create(
+            request_type=ZMQRequestType.GET_METRICS,
+            sender_id=f"mock_client_{client_id}",
+            body={},
         )
         self.socket.send_multipart(msg.serialize())
         return ZMQMessage.deserialize(self.socket.recv_multipart(copy=False))
@@ -455,6 +467,222 @@ def test_storage_unit_data_capacity_uses_active_keys():
     assert len(storage._active_keys) == 2
     storage.put_data({"f": [4]}, global_indexes=[3])
     assert storage._active_keys == {0, 1, 3}
+
+
+def test_disk_storage_unit_data_round_trip_and_partial_update(tmp_path):
+    """SSD storage preserves field-level SimpleStorage semantics."""
+    storage = DiskStorageUnitData(3, str(tmp_path), "test_unit", 1024 * 1024)
+    try:
+        assert storage._connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        storage.put_data(
+            {
+                "tensor": [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])],
+                "text": ["first", "second"],
+            },
+            [10, 11],
+        )
+        storage.put_data({"text": ["updated"]}, [10])
+
+        result = storage.get_data(["tensor", "text"], [11, 10])
+        torch.testing.assert_close(result["tensor"][0], torch.tensor([3.0, 4.0]))
+        torch.testing.assert_close(result["tensor"][1], torch.tensor([1.0, 2.0]))
+        assert result["text"] == ["second", "updated"]
+        assert storage.active_key_count == 2
+        assert storage.disk_usage_bytes > 0
+
+        storage.clear([11])
+        assert storage.active_key_count == 1
+        with pytest.raises(KeyError, match="key 11 not found"):
+            storage.get_data(["tensor"], [11])
+        storage.clear([10])
+        assert not list((tmp_path / "test_unit").glob("*.batch"))
+    finally:
+        storage.close()
+
+    assert not (tmp_path / "test_unit").exists()
+
+
+def test_disk_storage_capacity_failure_is_atomic(tmp_path):
+    storage = DiskStorageUnitData(1, str(tmp_path), "capacity_unit", 0)
+    try:
+        storage.put_data({"value": [torch.tensor([1])]}, [1])
+        with pytest.raises(ValueError, match="Storage capacity exceeded"):
+            storage.put_data({"value": [torch.tensor([2])]}, [2])
+
+        assert storage.active_key_count == 1
+        torch.testing.assert_close(storage.get_data(["value"], [1])["value"][0], torch.tensor([1]))
+    finally:
+        storage.close()
+
+
+def test_disk_storage_write_failure_rolls_back(monkeypatch, tmp_path):
+    storage = DiskStorageUnitData(10, str(tmp_path), "failure_unit", 1024 * 1024)
+
+    def fail_write(_, __):
+        raise sqlite3.OperationalError("disk full")
+
+    try:
+        storage.put_data({"value": [torch.tensor([1.0])]}, [1])
+        old_batch_files = set((tmp_path / "failure_unit").glob("*.batch"))
+        monkeypatch.setattr(storage, "_write_all", fail_write)
+        with pytest.raises(sqlite3.OperationalError, match="disk full"):
+            storage.put_data({"value": [torch.tensor([2.0])]}, [1])
+
+        assert storage.active_key_count == 1
+        assert storage._connection.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == 1
+        assert storage._connection.execute("SELECT COUNT(*) FROM field_batches").fetchone()[0] == 1
+        assert set((tmp_path / "failure_unit").glob("*.batch")) == old_batch_files
+        torch.testing.assert_close(storage.get_data(["value"], [1])["value"][0], torch.tensor([1.0]))
+    finally:
+        storage.close()
+
+
+def test_disk_storage_nested_and_non_tensor_batches(tmp_path):
+    storage = DiskStorageUnitData(10, str(tmp_path), "complex_unit", 1024 * 1024)
+    nested = torch.nested.as_nested_tensor(
+        [torch.tensor([1, 2]), torch.tensor([3, 4, 5])],
+        layout=torch.jagged,
+    )
+    metadata = tensordict.NonTensorStack("first", "second")
+    try:
+        storage.put_data({"nested": nested, "metadata": metadata}, [1, 2])
+        result = storage.get_data(["nested", "metadata"], [2, 1])
+
+        torch.testing.assert_close(result["nested"][0], torch.tensor([3, 4, 5]))
+        torch.testing.assert_close(result["nested"][1], torch.tensor([1, 2]))
+        assert result["metadata"] == ["second", "first"]
+    finally:
+        storage.close()
+
+
+def test_disk_checkpoint_is_portable_between_storage_modes(tmp_path):
+    disk_checkpoint = str(tmp_path / "disk_checkpoint.pkl")
+    memory_checkpoint = str(tmp_path / "memory_checkpoint.pkl")
+    disk = DiskStorageUnitData(10, str(tmp_path), "checkpoint_source", 1024 * 1024)
+    memory = StorageUnitData(10)
+    restored_disk = DiskStorageUnitData(10, str(tmp_path), "checkpoint_target", 1024 * 1024)
+    try:
+        disk.put_data({"value": [torch.tensor([1.0]), torch.tensor([2.0])]}, [1, 2])
+        disk.save_checkpoint(disk_checkpoint, "source")
+        memory.load_checkpoint(disk_checkpoint)
+        torch.testing.assert_close(memory.get_data(["value"], [2])["value"][0], torch.tensor([2.0]))
+
+        memory.save_checkpoint(memory_checkpoint, "memory")
+        restored_disk.load_checkpoint(memory_checkpoint)
+        restored = restored_disk.get_data(["value"], [1, 2])["value"]
+        torch.testing.assert_close(restored[0], torch.tensor([1.0]))
+        torch.testing.assert_close(restored[1], torch.tensor([2.0]))
+    finally:
+        disk.close()
+        restored_disk.close()
+
+
+def test_incomplete_disk_checkpoint_rolls_back(tmp_path):
+    checkpoint = tmp_path / "incomplete_checkpoint.pkl"
+    storage = DiskStorageUnitData(10, str(tmp_path), "rollback_target", 1024 * 1024)
+    try:
+        storage.put_data({"value": [torch.tensor([1.0])]}, [1])
+        old_batch_files = set((tmp_path / "rollback_target").glob("*.batch"))
+        storage.save_checkpoint(str(checkpoint), "source")
+        checkpoint.write_bytes(checkpoint.read_bytes()[:-10])
+
+        with pytest.raises((ValueError, EOFError, pickle.UnpicklingError)):
+            storage.load_checkpoint(str(checkpoint))
+
+        assert set((tmp_path / "rollback_target").glob("*.batch")) == old_batch_files
+        torch.testing.assert_close(storage.get_data(["value"], [1])["value"][0], torch.tensor([1.0]))
+    finally:
+        storage.close()
+
+
+def test_storage_unit_ssd_offload_e2e(ray_setup, tmp_path):
+    """The configured actor path uses SSD storage through the public ZMQ data plane."""
+    actor = SimpleStorageUnit.options(max_concurrency=50, num_cpus=1).remote(
+        storage_unit_size=10,
+        offload_path=str(tmp_path),
+        offload_cache_size_bytes=1024 * 1024,
+    )
+    info = ray.get(actor.get_zmq_server_info.remote())
+    client = MockStorageClient(info.to_addr("put_get_socket"), info.ip)
+    time.sleep(1)
+    try:
+        response = client.send_put(0, [1, 2], {"value": [torch.tensor([1.0]), torch.tensor([2.0])]})
+        assert response.request_type == ZMQRequestType.PUT_DATA_RESPONSE
+
+        response = client.send_get(0, [2, 1], ["value"])
+        assert response.request_type == ZMQRequestType.GET_DATA_RESPONSE
+        torch.testing.assert_close(response.body["data"]["value"][0], torch.tensor([2.0]))
+
+        metrics = client.send_get_metrics(0).body
+        assert metrics["active_keys"] == 2
+        assert metrics["offload_disk_bytes"] > 0
+    finally:
+        client.close()
+        ray.get(actor.close.remote(), timeout=10)
+        ray.kill(actor)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    os.environ.get("TQ_RUN_MOONCAKE_E2E") != "1",
+    reason="requires a local mooncake_master with SSD offload enabled",
+)
+def test_storage_unit_mooncake_offload_e2e(ray_setup, tmp_path):
+    """Exercise SimpleStorage's public ZMQ path through a real Mooncake SSD client."""
+    mooncake_config = {
+        "local_hostname": "127.0.0.1",
+        "metadata_server": "P2PHANDSHAKE",
+        "master_server_address": "127.0.0.1:50051",
+        "global_segment_size": 64 * 1024 * 1024,
+        "local_buffer_size": 16 * 1024 * 1024,
+        "protocol": "tcp",
+        "device_name": "",
+        "put_timeout_seconds": 30,
+        "retry_interval_seconds": 0.1,
+        "offload": {
+            "local_buffer_size_bytes": 32 * 1024 * 1024,
+            "heartbeat_interval_seconds": 1,
+            "use_uring": False,
+        },
+    }
+    actor = SimpleStorageUnit.options(max_concurrency=50, num_cpus=1).remote(
+        storage_unit_size=128,
+        offload_path=str(tmp_path),
+        offload_cache_size_bytes=1024 * 1024,
+        offload_backend="mooncake",
+        mooncake_config=mooncake_config,
+    )
+    info = ray.get(actor.get_zmq_server_info.remote())
+    client = MockStorageClient(info.to_addr("put_get_socket"), info.ip)
+    time.sleep(1)
+    try:
+        batch_size = 8
+        sample_size = 1024 * 1024
+        for batch_index in range(12):
+            indexes = list(range(batch_index * batch_size, (batch_index + 1) * batch_size))
+            values = torch.full((batch_size, sample_size), batch_index, dtype=torch.uint8)
+            response = client.send_put(0, indexes, {"value": values})
+            assert response.request_type == ZMQRequestType.PUT_DATA_RESPONSE, response.body
+
+        # The first values exceed the 64 MiB Mooncake segment and must be read
+        # through its local-disk path after the 500 ms master lease expires.
+        time.sleep(2)
+        response = client.send_get(0, [0, 7, 88, 95], ["value"])
+        assert response.request_type == ZMQRequestType.GET_DATA_RESPONSE, response.body
+        values = response.body["data"]["value"]
+        torch.testing.assert_close(values[0], torch.zeros(sample_size, dtype=torch.uint8))
+        torch.testing.assert_close(values[-1], torch.full((sample_size,), 11, dtype=torch.uint8))
+
+        metrics = client.send_get_metrics(0).body
+        assert metrics["active_keys"] == 96
+        assert metrics["offload_disk_bytes"] > 64 * 1024 * 1024
+    finally:
+        client.close()
+        ray.get(actor.close.remote(), timeout=20)
+        ray.kill(actor)
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_storage_unit_data_parser(storage_setup):

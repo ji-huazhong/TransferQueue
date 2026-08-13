@@ -176,6 +176,12 @@ class TQMetricsExporter:
         self.storage_memory_rss = Gauge(
             "tq_storage_memory_rss_bytes", "Storage unit process RSS memory", ["storage_unit_id"], registry=r
         )
+        self.storage_offload_disk = Gauge(
+            "tq_storage_offload_disk_bytes",
+            "Disk bytes used by SimpleStorage SSD offload",
+            ["storage_unit_id"],
+            registry=r,
+        )
 
         # ---- Storage request metrics (collected via ZMQ, exposed as gauges) ----
         # P50/P99 are pre-computed on the storage unit side and sent via ZMQ,
@@ -353,6 +359,7 @@ class TQMetricsExporter:
                             pass
                 self.storage_active_keys.labels(storage_unit_id=label).set(active)
                 self.storage_memory_rss.labels(storage_unit_id=label).set(metrics.get("process_rss_bytes", 0))
+                self.storage_offload_disk.labels(storage_unit_id=label).set(metrics.get("offload_disk_bytes", 0))
 
                 # Per-operation request stats
                 for op_type, op_data in metrics.get("op_stats", {}).items():
