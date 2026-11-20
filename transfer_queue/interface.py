@@ -942,7 +942,9 @@ async def async_kv_put(
             raise ValueError("`fields` can only be dict or TensorDict")
 
         # After put, batch_meta.field_names will include the new fields written by user
-        batch_meta = await tq_client.async_put(fields, batch_meta, data_parser=data_parser)
+        batch_meta = await tq_client.async_put(
+            fields, batch_meta, data_parser=data_parser, update_custom_meta=tag is not None
+        )
     else:
         # Directly update custom_meta (tag) to controller
         await tq_client.async_set_custom_meta(batch_meta)
@@ -1049,7 +1051,9 @@ async def async_kv_batch_put(
     # 3. put data
     if fields is not None:
         # After put, batch_meta.field_names will include the new fields written by user
-        batch_meta = await tq_client.async_put(fields, batch_meta, data_parser=data_parser)
+        batch_meta = await tq_client.async_put(
+            fields, batch_meta, data_parser=data_parser, update_custom_meta=tags is not None
+        )
     else:
         # Directly update custom_meta (tags) to controller
         await tq_client.async_set_custom_meta(batch_meta)

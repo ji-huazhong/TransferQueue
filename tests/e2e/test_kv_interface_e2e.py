@@ -1508,6 +1508,56 @@ class TestKVUpdateE2E:
         tq_api.kv_clear(keys="k", partition_id="test_partition")
 
 
+@pytest.mark.parametrize("batched", [False, True], ids=["single", "batch"])
+def test_field_only_put_preserves_tags_without_writing_them(tq_system, tq_api, monkeypatch, batched):
+    from transfer_queue import interface
+    from transfer_queue.utils.zmq_utils import ZMQRequestType
+
+    partition = "field_only_tags"
+    tq_api.kv_put("key", partition, tag={"version": 1})
+    client = interface._maybe_create_tq_client()
+    original = client._request_controller
+    calls = []
+
+    async def record(*args, **kwargs):
+        calls.append(kwargs["request_type"])
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(client, "_request_controller", record)
+    if batched:
+        tq_api.kv_batch_put(["key"], partition, fields=TensorDict({"x": torch.ones(1, 4)}, batch_size=[1]))
+    else:
+        tq_api.kv_put("key", partition, fields={"x": torch.ones(4)})
+    assert ZMQRequestType.SET_CUSTOM_META not in calls
+    assert client.kv_retrieve_meta(["key"], partition).custom_meta == [{"version": 1}]
+
+    calls.clear()
+    if batched:
+        tq_api.kv_batch_put(
+            ["key"], partition, fields=TensorDict({"x": torch.zeros(1, 4)}, batch_size=[1]), tags=[{"version": 2}]
+        )
+    else:
+        tq_api.kv_put("key", partition, fields={"x": torch.zeros(4)}, tag={"version": 2})
+    assert calls.count(ZMQRequestType.SET_CUSTOM_META) == 1
+    assert client.kv_retrieve_meta(["key"], partition).custom_meta == [{"version": 2}]
+    tq_api.kv_clear("key", partition)
+
+
+def test_direct_put_still_clears_explicit_empty_custom_meta(tq_system):
+    from transfer_queue import interface
+
+    partition = "direct_put_empty_tags"
+    tq.kv_put("key", partition, fields={"x": torch.ones(4)}, tag={"version": 1})
+    client = interface._maybe_create_tq_client()
+    metadata = client.kv_retrieve_meta(["key"], partition)
+    metadata.clear_custom_meta()
+    client.put(TensorDict({"x": torch.zeros(1, 4)}, batch_size=[1]), metadata=metadata, update_custom_meta=False)
+    assert client.kv_retrieve_meta(["key"], partition).custom_meta == [{"version": 1}]
+    client.put(TensorDict({"x": torch.zeros(1, 4)}, batch_size=[1]), metadata=metadata)
+    assert client.kv_retrieve_meta(["key"], partition).custom_meta == [{}]
+    tq.kv_clear("key", partition)
+
+
 def run_tests():
     """Run all e2e tests manually for debugging."""
     pytest.main([__file__, "-v", "-s"])

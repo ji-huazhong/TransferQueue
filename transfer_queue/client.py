@@ -384,14 +384,15 @@ class AsyncTransferQueueClient:
         metadata: BatchMeta | None = None,
         partition_id: str | None = None,
         data_parser: Callable[[Any], Any] | None = None,
+        *,
+        update_custom_meta: bool = True,
     ) -> BatchMeta:
         """Asynchronously write data to storage units based on metadata.
 
         If metadata is not provided, it will be created automatically using insert mode
         with the provided data fields and partition_id.
 
-        During put, the custom_meta in metadata will update the corresponding custom_meta in
-        TransferQueue Controller.
+        During put, custom_meta updates the controller unless update_custom_meta is False.
 
         Note:
             When using multiple workers for distributed execution, there may be data
@@ -412,6 +413,9 @@ class AsyncTransferQueueClient:
                          The number of elements per column must also remain unchanged.
                          Do not change the inner order of values within each column.
                          Only supported by SimpleStorage.
+            update_custom_meta: Whether to write the custom_meta in metadata to the controller.
+                                Defaults to True, including explicit empty metadata that clears tags.
+                                KV field-only writes use False to leave existing tags untouched.
 
         Warning:
             The fields written are ``data.keys()``; ``metadata.field_names`` does not restrict
@@ -516,7 +520,8 @@ class AsyncTransferQueueClient:
         ):
             await self.storage_manager.put_data(data, metadata, data_parser=data_parser)
 
-        await self.async_set_custom_meta(metadata)
+        if update_custom_meta:
+            await self.async_set_custom_meta(metadata)
 
         logger.debug(
             f"[{self.client_id}]: partition {partition_id} put {metadata.size} samples to storage units successfully."
@@ -1778,14 +1783,15 @@ class TransferQueueClient(AsyncTransferQueueClient):
         metadata: BatchMeta | None = None,
         partition_id: str | None = None,
         data_parser: Callable[[Any], Any] | None = None,
+        *,
+        update_custom_meta: bool = True,
     ) -> BatchMeta:
         """Synchronously write data to storage units based on metadata.
 
         If metadata is not provided, it will be created automatically using insert mode
         with the provided data fields and partition_id.
 
-        During put, the custom_meta in metadata will update the corresponding custom_meta in
-        TransferQueue Controller.
+        During put, custom_meta updates the controller unless update_custom_meta is False.
 
         Note:
             When using multiple workers for distributed execution, there may be data
@@ -1806,6 +1812,8 @@ class TransferQueueClient(AsyncTransferQueueClient):
                          The number of elements per column must also remain unchanged.
                          Do not change the inner order of values within each column.
                          Only supported by SimpleStorage.
+            update_custom_meta: Whether to write custom_meta to the controller, including empty
+                                metadata that clears tags. Defaults to True, as in async_put.
 
         Warning:
             The fields written are ``data.keys()``; ``metadata.field_names`` does not restrict
@@ -1858,7 +1866,13 @@ class TransferQueueClient(AsyncTransferQueueClient):
             >>> # This will create metadata in "insert" mode internally.
             >>> metadata = client.put(data=prompts_repeated_batch, partition_id=current_partition_id)
         """
-        return self._put(data=data, metadata=metadata, partition_id=partition_id, data_parser=data_parser)
+        return self._put(
+            data=data,
+            metadata=metadata,
+            partition_id=partition_id,
+            data_parser=data_parser,
+            update_custom_meta=update_custom_meta,
+        )
 
     def update(
         self,
