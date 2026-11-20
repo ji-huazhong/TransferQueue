@@ -1910,7 +1910,9 @@ class TransferQueueController:
 
         # must fetch fields that the requested samples all have
         data_fields = _fields_ready_in_all(partition, verified_global_indexes)
-        return self.generate_batch_meta(partition_id, verified_global_indexes, data_fields, mode="force_fetch")
+        # Readiness was just checked for every returned field; an empty field set stays unready.
+        mode = "fetch" if data_fields else "force_fetch"
+        return self.generate_batch_meta(partition_id, verified_global_indexes, data_fields, mode=mode)
 
     def kv_exists(self, keys: list[str], partition_id: str) -> dict[str, list[str]]:
         """Map each existing key to its ready fields, linked ones included, without logging the missing.
