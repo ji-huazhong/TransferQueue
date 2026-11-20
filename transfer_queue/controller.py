@@ -1697,6 +1697,8 @@ class TransferQueueController:
 
     def _check_public_not_linked(self, global_indexes: list[int], field_names: list[str] | None = None) -> None:
         """Refuse to clear or rewrite public payloads that keys of other partitions still link to."""
+        if not global_indexes:
+            return
         linked: set[int] = set()
         linkers: list[str] = []
         for p in self.partitions.values():
