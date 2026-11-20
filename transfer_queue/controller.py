@@ -2486,49 +2486,47 @@ class TransferQueueController:
             body={"success": False, "message": message},
         )
 
+    _REQUEST_HANDLERS = {
+        ZMQRequestType.GET_META: "_handle_get_meta_request",
+        ZMQRequestType.NOTIFY_DATA_UPDATE: "_handle_notify_data_update_request",
+        ZMQRequestType.GET_PARTITION_META: "_handle_get_partition_meta_request",
+        ZMQRequestType.SET_CUSTOM_META: "_handle_set_custom_meta_request",
+        ZMQRequestType.MARK_CLEARING: "_handle_mark_clearing_request",
+        ZMQRequestType.CLEAR_META: "_handle_clear_meta_request",
+        ZMQRequestType.CLEAR_PARTITION: "_handle_clear_partition_request",
+        ZMQRequestType.GET_CONSUMPTION: "_handle_get_consumption_request",
+        ZMQRequestType.RESET_CONSUMPTION: "_handle_reset_consumption_request",
+        ZMQRequestType.GET_PRODUCTION: "_handle_get_production_request",
+        ZMQRequestType.GET_LIST_PARTITIONS: "_handle_get_list_partitions_request",
+        ZMQRequestType.KV_RETRIEVE_META: "_handle_kv_retrieve_meta_request",
+        ZMQRequestType.KV_MARK_CLEARING: "_handle_kv_mark_clearing_request",
+        ZMQRequestType.KV_RETRIEVE_KEYS: "_handle_kv_retrieve_keys_request",
+        ZMQRequestType.KV_LIST: "_handle_kv_list_request",
+        ZMQRequestType.KV_DESCRIBE: "_handle_kv_describe_request",
+        ZMQRequestType.KV_EXISTS: "_handle_kv_exists_request",
+        ZMQRequestType.KV_PREPARE_UPDATE: "_handle_kv_prepare_update_request",
+        ZMQRequestType.VALIDATE_DUMP_SCHEMA: "_handle_validate_dump_schema_request",
+        ZMQRequestType.KV_CLEAR_FIELDS: "_handle_kv_clear_fields_request",
+        ZMQRequestType.KV_LINK: "_handle_kv_link_request",
+        ZMQRequestType.MARK_UNLINKED_PUBLIC_CLEARING: "_handle_mark_unlinked_public_clearing_request",
+        ZMQRequestType.LINK: "_handle_link_request",
+        ZMQRequestType.CHECK_PUBLIC_WRITE: "_handle_check_public_write_request",
+        ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT: "_handle_save_controller_checkpoint_request",
+        ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT: "_handle_load_controller_checkpoint_request",
+    }
+
     def _handle_request(self, request_msg: ZMQMessage, monitor: Any) -> ZMQMessage | None:
         """Build the response for a decoded request, or None if no handler matches.
 
         Whatever the matching handler raises propagates to the caller, which turns it
         into an error response.
         """
-        handlers = {
-            ZMQRequestType.GET_META: self._handle_get_meta_request,
-            ZMQRequestType.NOTIFY_DATA_UPDATE: self._handle_notify_data_update_request,
-            ZMQRequestType.GET_PARTITION_META: self._handle_get_partition_meta_request,
-            ZMQRequestType.SET_CUSTOM_META: self._handle_set_custom_meta_request,
-            ZMQRequestType.MARK_CLEARING: self._handle_mark_clearing_request,
-            ZMQRequestType.CLEAR_META: self._handle_clear_meta_request,
-            ZMQRequestType.CLEAR_PARTITION: self._handle_clear_partition_request,
-            ZMQRequestType.GET_CONSUMPTION: self._handle_get_consumption_request,
-            ZMQRequestType.RESET_CONSUMPTION: self._handle_reset_consumption_request,
-            ZMQRequestType.GET_PRODUCTION: self._handle_get_production_request,
-            ZMQRequestType.GET_LIST_PARTITIONS: self._handle_get_list_partitions_request,
-            ZMQRequestType.KV_RETRIEVE_META: self._handle_kv_retrieve_meta_request,
-            ZMQRequestType.KV_MARK_CLEARING: self._handle_kv_mark_clearing_request,
-            ZMQRequestType.KV_RETRIEVE_KEYS: self._handle_kv_retrieve_keys_request,
-            ZMQRequestType.KV_LIST: self._handle_kv_list_request,
-            ZMQRequestType.KV_DESCRIBE: self._handle_kv_describe_request,
-            ZMQRequestType.KV_EXISTS: self._handle_kv_exists_request,
-            ZMQRequestType.KV_PREPARE_UPDATE: self._handle_kv_prepare_update_request,
-            ZMQRequestType.VALIDATE_DUMP_SCHEMA: self._handle_validate_dump_schema_request,
-            ZMQRequestType.KV_CLEAR_FIELDS: self._handle_kv_clear_fields_request,
-            ZMQRequestType.KV_LINK: self._handle_kv_link_request,
-            ZMQRequestType.MARK_UNLINKED_PUBLIC_CLEARING: self._handle_mark_unlinked_public_clearing_request,
-            ZMQRequestType.LINK: self._handle_link_request,
-            ZMQRequestType.CHECK_PUBLIC_WRITE: self._handle_check_public_write_request,
-            ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT: self._handle_save_controller_checkpoint_request,
-            ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT: self._handle_load_controller_checkpoint_request,
-        }
-        handler = handlers.get(request_msg.request_type)
-        if handler is None:
+        handler_name = self._REQUEST_HANDLERS.get(request_msg.request_type)
+        if handler_name is None:
             return None
+        handler = getattr(self, handler_name)
 
-        checkpoint_requests = {
-            ZMQRequestType.SAVE_CONTROLLER_CHECKPOINT,
-            ZMQRequestType.LOAD_CONTROLLER_CHECKPOINT,
-        }
-        if request_msg.request_type in checkpoint_requests:
+        if handler_name in ("_handle_save_controller_checkpoint_request", "_handle_load_controller_checkpoint_request"):
             return handler(request_msg)
 
         with monitor.measure(op_type=request_msg.request_type.value):
