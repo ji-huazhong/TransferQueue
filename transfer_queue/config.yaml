@@ -29,6 +29,8 @@ backend:
     # alive Ray nodes, guaranteeing an even split of memory/bandwidth usage per node.
     # Recommended: >= 2 x number of nodes so each node hosts multiple units.
     num_data_storage_units: 2
+    # Native ZMQ I/O threads per storage unit; must be a positive integer.
+    zmq_io_threads: 4
     # Optional Ray custom resource required on storage nodes. null keeps all alive nodes eligible.
     required_node_resource: null
     # ZMQ Server IP & Ports (automatically generated during init)

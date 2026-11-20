@@ -40,6 +40,7 @@ import ray
 import tensordict
 import torch
 import zmq
+from omegaconf import OmegaConf
 
 from transfer_queue.storage.simple_storage import (
     HybridStorageUnitData,
@@ -155,6 +156,36 @@ def storage_setup(ray_setup):
 
     # Cleanup
     ray.kill(storage_actor)
+
+
+@pytest.mark.parametrize("io_threads", [None, 1, 4, 8], ids=["default", "one", "four", "eight"])
+def test_configured_io_threads_support_put_get_clear(io_threads):
+    config = {} if io_threads is None else {"zmq_io_threads": io_threads}
+    defaults = OmegaConf.load(Path(__file__).parents[1] / "transfer_queue/config.yaml")
+    expected_threads = defaults.backend.SimpleStorage.zmq_io_threads if io_threads is None else io_threads
+    unit = SimpleStorageUnit.__ray_metadata__.modified_class(config)
+    client = MockStorageClient(unit.zmq_server_info.to_addr("put_get_socket"), unit.zmq_server_info.ip)
+    try:
+        assert unit.zmq_context.get(zmq.IO_THREADS) == expected_threads
+        data = torch.arange(4, dtype=torch.float32)
+        assert client.send_put(0, [0], {"x": [data]}).request_type == ZMQRequestType.PUT_DATA_RESPONSE
+        response = client.send_get(0, [0], ["x"])
+        assert response.request_type == ZMQRequestType.GET_DATA_RESPONSE
+        torch.testing.assert_close(response.body["data"]["x"][0], data)
+        assert client.send_clear(0, [0]).request_type == ZMQRequestType.CLEAR_DATA_RESPONSE
+    finally:
+        client.close()
+        unit.shutdown()
+
+
+@pytest.mark.parametrize("io_threads", [0, -1, True, False, 1.5, "4", None])
+def test_invalid_io_threads_fail_before_storage_creation(io_threads, monkeypatch):
+    def unexpected_storage_creation(*args, **kwargs):
+        pytest.fail("Invalid thread configuration must fail before creating storage resources")
+
+    monkeypatch.setattr("transfer_queue.storage.simple_storage.StorageUnitData", unexpected_storage_creation)
+    with pytest.raises(ValueError, match="zmq_io_threads must be a positive integer"):
+        SimpleStorageUnit.__ray_metadata__.modified_class({"zmq_io_threads": io_threads})
 
 
 def test_put_get_single_client(storage_setup):

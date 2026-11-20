@@ -87,6 +87,20 @@ Currently, we support the following storage backends:
 
 Among them, `SimpleStorageUnit` serves as our default storage backend, coordinated by the `AsyncSimpleStorageManager` class. Storage units are distributed across eligible Ray nodes. Within SimpleStorage, each partition's rows are balanced across units by row count; this does not account for differences in payload size.
 
+Set the native ZMQ I/O thread count for each storage unit through `tq.init`:
+
+```python
+from omegaconf import OmegaConf
+import transfer_queue as tq
+
+tq.init(OmegaConf.create({"backend": {"SimpleStorage": {"zmq_io_threads": 4}}}))
+```
+
+`zmq_io_threads` must be a positive integer and takes effect when storage units start.
+More threads may improve large-payload throughput at the cost of additional CPU use;
+measure with your workload before increasing it. This setting controls storage I/O
+threads, independently of the number of storage units and client I/O threads.
+
 `SimpleStorageUnit` employs a 2D data structure as follows:
 
 - Each row corresponds to a training sample, assigned a unique index within the corresponding global batch.

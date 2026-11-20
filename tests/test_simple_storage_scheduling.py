@@ -106,6 +106,7 @@ def test_simple_storage_initialization_forwards_required_node_resource(monkeypat
                     "num_data_storage_units": 1,
                     "total_storage_size": None,
                     "required_node_resource": "storage_pool",
+                    "zmq_io_threads": 8,
                 },
             }
         }
@@ -115,3 +116,4 @@ def test_simple_storage_initialization_forwards_required_node_resource(monkeypat
 
     get_strategies.assert_called_once_with(1, required_node_resource="storage_pool")
     assert handles == {"TransferQueueStorageUnit#0": storage_handle}
+    assert storage_unit.options.return_value.remote.call_args.kwargs["config"]["zmq_io_threads"] == 8

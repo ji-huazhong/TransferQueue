@@ -926,6 +926,9 @@ class SimpleStorageUnit:
             config: The ``backend.SimpleStorage`` configuration. Bootstrap adds one
                 shared internal run ID.
         """
+        io_threads = config.get("zmq_io_threads", 4)
+        if isinstance(io_threads, bool) or not isinstance(io_threads, int) or io_threads < 1:
+            raise ValueError("backend.SimpleStorage.zmq_io_threads must be a positive integer")
         self.storage_unit_id = f"TQ_STORAGE_UNIT_{uuid4().hex[:8]}"
         total_storage_size = config.get("total_storage_size")
         num_data_storage_units = int(config.get("num_data_storage_units", 1))
@@ -972,7 +975,7 @@ class SimpleStorageUnit:
 
         self._metrics: TQMetricsExporter | None = None
 
-        self._init_zmq_socket()
+        self._init_zmq_socket(io_threads)
         self._start_process_put_get()
 
         # Register finalizer for graceful cleanup when garbage collected
@@ -994,13 +997,13 @@ class SimpleStorageUnit:
         if self._finalizer.alive:
             self._finalizer()
 
-    def _init_zmq_socket(self) -> None:
+    def _init_zmq_socket(self, io_threads: int) -> None:
         """
         Initialize ZMQ socket connections between storage unit and controller/clients:
         - put_get_socket (ROUTER): Handle put/get requests from clients.
         - worker_socket (DEALER): Backend socket for worker communication.
         """
-        self.zmq_context = zmq.Context()
+        self.zmq_context = zmq.Context(io_threads=io_threads)
         self._node_ip = get_node_ip_address()
 
         # Frontend: ROUTER for receiving client requests
