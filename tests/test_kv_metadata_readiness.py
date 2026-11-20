@@ -71,6 +71,22 @@ def test_kv_metadata_stays_unready_after_mark_clearing(controller):
     assert controller.kv_retrieve_meta(["b"], "p").production_status.tolist() == [1]
 
 
+def test_kv_mark_clearing_returns_snapshot_before_zeroing_readiness(controller):
+    metadata = controller.kv_mark_clearing(["a", "absent", "a"], "p")
+    assert metadata.global_indexes == [0, 0]
+    assert set(metadata.field_names) == {"shared", "left"}
+    assert metadata.production_status.tolist() == [1, 1]
+    assert metadata.custom_meta == [{"tag": "a"}, {"tag": "a"}]
+    assert controller.kv_retrieve_meta(["a"], "p").production_status.tolist() == [0]
+    assert controller.kv_retrieve_meta(["b"], "p").production_status.tolist() == [1]
+
+
+def test_kv_mark_clearing_missing_keys_preserves_existing_rows(controller):
+    assert controller.kv_mark_clearing(["absent"], "p").size == 0
+    assert controller.kv_mark_clearing(["a"], "absent").size == 0
+    assert controller.kv_retrieve_meta(["a"], "p").production_status.tolist() == [1]
+
+
 def test_kv_metadata_new_key_is_unready(controller):
     metadata = controller.kv_retrieve_meta(["new"], "p", create=True)
     assert metadata.size == 1

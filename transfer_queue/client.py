@@ -1092,6 +1092,37 @@ class AsyncTransferQueueClient:
         )
         return response_msg.body["metadata"], response_msg.body["merge_plan"]
 
+    async def async_kv_clear(self, keys: list[str] | str, partition_id: str) -> None:
+        """Mark keys unready, delete their stored data, then release their metadata."""
+        if isinstance(keys, str):
+            keys = [keys]
+        elif isinstance(keys, list):
+            if not keys:
+                raise ValueError("Received an empty list as keys.")
+            if not all(isinstance(key, str) for key in keys):
+                raise TypeError("Not all elements in `keys` are strings.")
+        else:
+            raise TypeError("Only string or list of strings are allowed as `keys`.")
+
+        metadata = await self._kv_mark_clearing_in_controller(keys, partition_id)
+        if metadata.size > 0:
+            try:
+                await self.storage_manager.clear_data(metadata)
+                await self._clear_meta_in_controller(metadata)
+            except Exception as error:
+                raise RuntimeError(f"Error in kv_clear operation: {error}") from error
+
+    @with_controller_socket
+    async def _kv_mark_clearing_in_controller(self, keys: list[str], partition_id: str, socket=None) -> BatchMeta:
+        """Mark keys for deletion in the controller and return their metadata snapshot."""
+        response = await self._request_controller(
+            socket=socket,
+            request_type=ZMQRequestType.KV_MARK_CLEARING,
+            response_type=ZMQRequestType.KV_MARK_CLEARING_RESPONSE,
+            body={"keys": keys, "partition_id": partition_id},
+        )
+        return response.body["metadata"]
+
     async def async_kv_clear_fields(self, keys: list[str], partition_id: str, fields: list[str]) -> None:
         """Clear fields of existing keys while keeping the keys, tags and consumption status.
 

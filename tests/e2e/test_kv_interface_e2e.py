@@ -1558,6 +1558,55 @@ def test_direct_put_still_clears_explicit_empty_custom_meta(tq_system):
     tq.kv_clear("key", partition)
 
 
+def test_full_key_clear_marks_before_storage_and_uses_two_controller_calls(tq_system, tq_api, monkeypatch):
+    from transfer_queue import interface
+    from transfer_queue.utils.zmq_utils import ZMQRequestType
+
+    partition = "clear_rpc_order"
+    tq_api.kv_put("key", partition, fields={"x": torch.ones(4)}, tag={"version": 1})
+    client = interface._maybe_create_tq_client()
+    controller_calls = []
+    request = client._request_controller
+    clear_data = client.storage_manager.clear_data
+
+    async def record(*args, **kwargs):
+        controller_calls.append(kwargs["request_type"])
+        return await request(*args, **kwargs)
+
+    async def check_marked(metadata, **kwargs):
+        controller = interface._TQ_CONTROLLER
+        current = await controller.kv_retrieve_meta.remote(["key"], partition)
+        assert current.size == 1 and current.production_status.tolist() == [0]
+        assert metadata.field_names == ["x"] and metadata.production_status.tolist() == [1]
+        await clear_data(metadata, **kwargs)
+
+    monkeypatch.setattr(client, "_request_controller", record)
+    monkeypatch.setattr(client.storage_manager, "clear_data", check_marked)
+    tq_api.kv_clear(["key", "absent"], partition)
+    assert controller_calls == [ZMQRequestType.KV_MARK_CLEARING, ZMQRequestType.CLEAR_META]
+    assert not tq_api.kv_list(partition).get(partition)
+
+
+def test_full_key_clear_storage_exception_keeps_unready_metadata_for_retry(tq_system, tq_api, monkeypatch):
+    from transfer_queue import interface
+
+    partition = "clear_retry"
+    tq_api.kv_put("key", partition, fields={"x": torch.ones(4)})
+    client = interface._maybe_create_tq_client()
+
+    async def fail_clear(*args, **kwargs):
+        raise ValueError("injected storage clear failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client.storage_manager, "clear_data", fail_clear)
+        with pytest.raises(RuntimeError, match="injected storage clear failure"):
+            tq_api.kv_clear("key", partition)
+    metadata = client.kv_retrieve_meta(["key"], partition)
+    assert metadata.size == 1 and metadata.production_status.tolist() == [0]
+    tq_api.kv_clear("key", partition)
+    assert not tq_api.kv_list(partition).get(partition)
+
+
 def run_tests():
     """Run all e2e tests manually for debugging."""
     pytest.main([__file__, "-v", "-s"])

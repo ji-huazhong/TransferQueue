@@ -1312,10 +1312,7 @@ async def async_kv_clear(keys: list[str] | str, partition_id: str, fields: list[
         )
         return
 
-    batch_meta = await tq_client.async_kv_retrieve_meta(keys=keys, partition_id=partition_id, create=False)
-
-    if batch_meta.size > 0:
-        await tq_client.async_clear_samples(batch_meta)
+    await tq_client.async_kv_clear(keys=keys, partition_id=partition_id)
 
 
 async def async_kv_link(

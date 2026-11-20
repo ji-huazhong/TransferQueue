@@ -1914,6 +1914,17 @@ class TransferQueueController:
         mode = "fetch" if data_fields else "force_fetch"
         return self.generate_batch_meta(partition_id, verified_global_indexes, data_fields, mode=mode)
 
+    def kv_mark_clearing(self, keys: list[str], partition_id: str) -> BatchMeta:
+        """Look up keys and mark them unready before the client deletes their stored data.
+
+        Returns:
+            The metadata snapshot from before marking, for storage and metadata cleanup.
+        """
+        metadata = self.kv_retrieve_meta(keys, partition_id)
+        if metadata.size > 0:
+            self.mark_clearing(metadata.global_indexes, metadata.partition_ids)
+        return metadata
+
     def kv_exists(self, keys: list[str], partition_id: str) -> dict[str, list[str]]:
         """Map each existing key to its ready fields, linked ones included, without logging the missing.
 
@@ -2492,6 +2503,7 @@ class TransferQueueController:
             ZMQRequestType.GET_PRODUCTION: self._handle_get_production_request,
             ZMQRequestType.GET_LIST_PARTITIONS: self._handle_get_list_partitions_request,
             ZMQRequestType.KV_RETRIEVE_META: self._handle_kv_retrieve_meta_request,
+            ZMQRequestType.KV_MARK_CLEARING: self._handle_kv_mark_clearing_request,
             ZMQRequestType.KV_RETRIEVE_KEYS: self._handle_kv_retrieve_keys_request,
             ZMQRequestType.KV_LIST: self._handle_kv_list_request,
             ZMQRequestType.KV_DESCRIBE: self._handle_kv_describe_request,
@@ -2687,6 +2699,10 @@ class TransferQueueController:
             ZMQRequestType.KV_RETRIEVE_META_RESPONSE,
             {"metadata": metadata},
         )
+
+    def _handle_kv_mark_clearing_request(self, request_msg: ZMQMessage) -> ZMQMessage:
+        metadata = self.kv_mark_clearing(request_msg.body["keys"], request_msg.body["partition_id"])
+        return self._make_response(request_msg, ZMQRequestType.KV_MARK_CLEARING_RESPONSE, {"metadata": metadata})
 
     def _handle_kv_retrieve_keys_request(self, request_msg: ZMQMessage) -> ZMQMessage:
         params = request_msg.body
