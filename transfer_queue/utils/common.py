@@ -15,6 +15,7 @@
 
 import os
 from contextlib import contextmanager
+from functools import cache
 
 import psutil
 import ray
@@ -86,11 +87,17 @@ def get_node_round_robin_scheduling_strategies(
     ]
 
 
+@cache
+def _physical_cpu_count():
+    """Query lazily once because physical CPU topology is stable during a worker's lifetime."""
+    return psutil.cpu_count(logical=False)
+
+
 @contextmanager
 def limit_pytorch_auto_parallel_threads(target_num_threads: int | None = None, info: str = ""):
     """Prevent PyTorch from overdoing the automatic parallelism during tensor aggregation operations."""
     pytorch_current_num_threads = torch.get_num_threads()
-    physical_cores = psutil.cpu_count(logical=False)
+    physical_cores = _physical_cpu_count()
     pid = os.getpid()
     if target_num_threads is None:
         # auto determine target_num_threads
