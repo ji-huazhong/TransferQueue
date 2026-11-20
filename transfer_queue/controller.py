@@ -68,7 +68,7 @@ PUBLIC_PARTITION = "__public__"
 
 def _fields_ready_in_all(partition: "DataPartitionStatus", global_indexes: list[int]) -> list[str]:
     """Return the fields every one of ``global_indexes`` has produced, all fields for no rows."""
-    col_mask = partition.production_status[global_indexes, :].sum(dim=0).reshape(-1) == len(global_indexes)
+    col_mask = partition.production_status.numpy()[global_indexes, :].sum(axis=0).reshape(-1) == len(global_indexes)
     return [name for name, col in partition.field_name_mapping.items() if col < len(col_mask) and col_mask[col]]
 
 

@@ -18,6 +18,7 @@ from transfer_queue.controller import (
     DataPartitionStatus,
     PartitionIndexManager,
     TransferQueueController,
+    _fields_ready_in_all,
 )
 
 
@@ -80,3 +81,17 @@ def test_kv_metadata_new_key_is_unready(controller):
 def test_kv_metadata_missing_keys_and_partition_are_empty(controller):
     assert controller.kv_retrieve_meta(["absent"], "p").size == 0
     assert controller.kv_retrieve_meta(["a"], "absent").size == 0
+
+
+def test_empty_readiness_query_returns_all_registered_fields(controller):
+    partition = controller.partitions["p"]
+    assert set(_fields_ready_in_all(partition, [])) == {"shared", "left"}
+
+
+def test_readiness_tracks_capacity_growth_and_repeated_rows(controller):
+    partition = controller.partitions["p"]
+    partition.ensure_samples_capacity(1024)
+    partition.ensure_fields_capacity(64)
+    assert _fields_ready_in_all(partition, [1, 0, 1]) == ["shared"]
+    controller.mark_clearing([1], ["p"])
+    assert _fields_ready_in_all(partition, [1, 0, 1]) == []
